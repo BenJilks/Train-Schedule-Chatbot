@@ -38,12 +38,6 @@ class FlowRecord(Base):
     destination_code = Column(String(4), ForeignKey('location_record.ncl_code'))
     direction = Column(String(1))
 
-    def __repr__(self):
-        output = ''
-        for c in self.__table__.columns:
-            output += '{}: {}\n'.format(c.name, getattr(self, c.name))
-        return output
-
 class FareRecord(Base):
     __tablename__ = 'fare_record'
     flow_id = Column(String(7), ForeignKey('flow_record.flow_id'), primary_key=True)
