@@ -9,3 +9,11 @@ class TestOpenRail(unittest.TestCase):
         prices = ticket_prices(db, 'BTN', 'VIC')
         self.assertGreater(len(prices), 0)
 
+        for price, ticket in prices:
+            print(price)
+            print(ticket.description)
+            print(ticket.tkt_type)
+            print(ticket.tkt_class)
+            print(ticket.tkt_group)
+            print()
+

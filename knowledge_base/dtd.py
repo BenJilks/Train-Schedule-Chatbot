@@ -7,11 +7,13 @@ import os
 import tempfile
 import sqlalchemy
 import shutil
+import datetime
+import enum
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm.session import Session, sessionmaker
-from sqlalchemy.sql.schema import Column, ForeignKey
-from sqlalchemy.sql.sqltypes import Integer, String
+from sqlalchemy.sql.schema import Column, ForeignKey, Identity
+from sqlalchemy.sql.sqltypes import Boolean, Enum, Integer, String, Text, Time
 from zipfile import ZipFile
 
 # FIXME: This should probably be in a config file
@@ -41,8 +43,57 @@ class FlowRecord(Base):
 class FareRecord(Base):
     __tablename__ = 'fare_record'
     flow_id = Column(String(7), ForeignKey('flow_record.flow_id'), primary_key=True)
-    ticket_code = Column(String(3), primary_key=True)
+    ticket_code = Column(String(3), ForeignKey('ticket_type.ticket_code'), primary_key=True)
     fare = Column(Integer)
+
+class TicketType(Base):
+    __tablename__ = 'ticket_type'
+    ticket_code = Column(String(3), primary_key=True)
+    description = Column(Text)
+    tkt_class = Column(Integer)
+    tkt_type = Column(String(1))
+    tkt_group = Column(String(1))
+    max_passengers = Column(Integer)
+    min_passengers = Column(Integer)
+    max_adults = Column(Integer)
+    min_adults = Column(Integer)
+    max_children = Column(Integer)
+    min_children = Column(Integer)
+    restricted_by_date = Column(Boolean)
+    restricted_by_train = Column(Boolean)
+    restricted_by_area = Column(Boolean)
+    validity_code = Column(String(2))
+    reservation_required = Column(String(2))
+    capri_code = Column(String(3))
+    uts_code = Column(String(2))
+    time_restriction = Column(Integer)
+    free_pass_lul = Column(Boolean)
+    package_mkr = Column(String(1))
+    fare_multiplier = Column(Integer)
+    discount_category = Column(String(2))
+
+class TimetableLocationType(enum.Enum):
+    Origin = enum.auto()
+    Intermediate = enum.auto()
+    Terminating = enum.auto()
+
+class TimetableLocation(Base):
+    __tablename__ = 'timetable_location'
+    id = Column(Integer, Identity(start=0), primary_key=True)
+    location_type = Column(Enum(TimetableLocationType))
+    location = Column(String(8))
+    scheduled_arrival_time = Column(Time)
+    scheduled_departure_time = Column(Time)
+    scheduled_pass = Column(Time)
+    public_arrival = Column(Time)
+    public_departure = Column(Time)
+    platform = Column(String(3))
+    line = Column(String(3))
+    path = Column(String(3))
+    activity = Column(String(12))
+    engineering_allowance = Column(String(2))
+    pathing_allowance = Column(String(2))
+    performance_allowance = Column(String(2))
 
 def open_dtd_database() -> Session:
     engine = sqlalchemy.create_engine('sqlite:///dtd.db')
@@ -75,8 +126,8 @@ def generate_dtd_token() -> str:
     response_json = json.loads(response.text)
     return response_json['token']
 
-def download_dtd_zip_file(token: str) -> tuple[str, str]:
-    FARES_URL = 'https://opendata.nationalrail.co.uk/api/staticfeeds/2.0/fares'
+def download_dtd_zip_file(token: str, category: str) -> tuple[str, str]:
+    FARES_URL = 'https://opendata.nationalrail.co.uk/api/staticfeeds/' + category
     HEADERS = { 
         'Content-Type': 'application/json',
         'X-Auth-Token': token,
@@ -104,7 +155,7 @@ def download_dtd_zip_file(token: str) -> tuple[str, str]:
     return path, filename
 
 def record_for_loc_entry(entry: str) -> tuple[type[Base], dict, int] | None:
-    entry_type = entry[0:2]
+    entry_type = entry[:2]
     if entry_type == 'RL':
         uic_code = entry[2:9]
         return LocationRecord, dict(
@@ -114,7 +165,7 @@ def record_for_loc_entry(entry: str) -> tuple[type[Base], dict, int] | None:
     return None
 
 def record_for_ffl_entry(entry: str) -> tuple[type[Base], dict, int] | None:
-    entry_type = entry[0:2]
+    entry_type = entry[:2]
     if entry_type == 'RF':
         flow_id = entry[42:49]
         return FlowRecord, dict(
@@ -130,11 +181,94 @@ def record_for_ffl_entry(entry: str) -> tuple[type[Base], dict, int] | None:
             fare = int(entry[12:20])), hash(flow_id)
     return None
 
+def record_for_tty_entry(entry: str) -> tuple[type[Base], dict, int] | None:
+    entry_type = entry[:1]
+    if entry_type == 'R':
+        ticket_code = entry[1:4]
+        return TicketType, dict(
+            ticket_code = ticket_code,
+            description = entry[28:43].strip(),
+            tkt_class = int(entry[43]),
+            tkt_type = entry[44],
+            tkt_group = entry[45],
+            max_passengers = int(entry[54:57]),
+            min_passengers = int(entry[57:60]),
+            max_adults = int(entry[60:63]),
+            min_adults = int(entry[63:66]),
+            max_children = int(entry[66:69]),
+            min_children = int(entry[69:72]),
+            restricted_by_date = entry[72] == 'Y',
+            restricted_by_train = entry[73] == 'Y',
+            restricted_by_area = entry[74] == 'Y',
+            validity_code = entry[75:77],
+            reservation_required = entry[98],
+            capri_code = entry[99:102],
+            uts_code = entry[103:105],
+            time_restriction = int(entry[105]),
+            free_pass_lul = entry[106] == 'Y',
+            package_mkr = entry[107],
+            fare_multiplier = int(entry[108:111]),
+            discount_category = entry[111:113]), hash(ticket_code)
+    return None
+
+def parse_time(time_str: str) -> datetime.time:
+    assert len(time_str) >= 4
+    hour_str = time_str[:2]
+    minute_str = time_str[2:4]
+    hour = 0 if hour_str == '  ' else int(hour_str)
+    minute = 0 if minute_str == '  ' else int(minute_str)
+    return datetime.time(hour=hour, minute=minute)
+
+def record_for_mca_entry(entry: str) -> tuple[type[Base], dict, int] | None:
+    entry_type = entry[:2]
+    if entry_type == 'LO':
+        return TimetableLocation, dict(
+            location_type = TimetableLocationType.Origin,
+            location = entry[2:10].strip(),
+            scheduled_departure_time = parse_time(entry[10:15]),
+            public_departure = parse_time(entry[15:19]),
+            platform = entry[19:22].strip(),
+            line = entry[22:25].strip(),
+            engineering_allowance = entry[25:27].strip(),
+            pathing_allowance = entry[27:29].strip(),
+            activity = entry[39:41].strip(),
+            performance_allowance = entry[41:43].strip()), hash(entry)
+    if entry_type == 'LI':
+        return TimetableLocation, dict(
+            location_type = TimetableLocationType.Intermediate,
+            location = entry[2:10].strip(),
+            scheduled_arrival_time = parse_time(entry[10:15]),
+            scheduled_departure_time = parse_time(entry[15:20]),
+            scheduled_pass = parse_time(entry[20:25]),
+            public_arrival = parse_time(entry[25:29]),
+            public_departure = parse_time(entry[29:33]),
+            platform = entry[33:36].strip(),
+            line = entry[36:39].strip(),
+            path = entry[39:42].strip(),
+            activity = entry[42:54].strip(),
+            engineering_allowance = entry[54:56].strip(),
+            pathing_allowance = entry[56:58].strip(),
+            performance_allowance = entry[58:60].strip()), hash(entry)
+    if entry_type == 'LT':
+        return TimetableLocation, dict(
+            location_type = TimetableLocationType.Origin,
+            location = entry[2:10].strip(),
+            scheduled_arrival_time = parse_time(entry[10:15]),
+            public_arrival = parse_time(entry[15:19]),
+            platform = entry[19:22].strip(),
+            path = entry[22:25].strip(),
+            activity = entry[25:37].strip()), hash(entry)
+    return None
+
 def record_for_entry(file: str, entry: str) -> tuple[type[Base], dict, int] | None:
     if file.endswith('LOC'):
         return record_for_loc_entry(entry)
     if file.endswith('FFL'):
         return record_for_ffl_entry(entry)
+    if file.endswith('TTY'):
+        return record_for_tty_entry(entry)
+    if file.endswith('MCA'):
+        return record_for_mca_entry(entry)
     return None
 
 def write_dtd_file_to_database(db: Session, path: str, file: str):
@@ -167,9 +301,11 @@ def write_dtd_file_set_to_database(db: Session, path: str):
     db.query(FareRecord).delete()
     db.query(FlowRecord).delete()
     db.query(LocationRecord).delete()
+    db.query(TicketType).delete()
+    db.query(TimetableLocation).delete()
 
     for file in os.listdir(path):
-        if not file[-3:] in ['LOC', 'FFL']:
+        if not file[-3:] in ['LOC', 'FFL', 'TTY', 'MCA']:
             continue
         write_dtd_file_to_database(db, path, file)
 
@@ -183,16 +319,18 @@ def update_dtd_database(db: Session):
 
     print('Updating DTD database')
     token = generate_dtd_token()
-    path, fares_zip = download_dtd_zip_file(token)
 
-    print(f"Extracting '{ fares_zip }'")
-    with ZipFile(path + '/' + fares_zip, 'r') as f:
-        f.extractall(path)
-    os.remove(path + '/' + fares_zip)
+    for category in ['2.0/fares', '3.0/timetable']:
+        path, fares_zip = download_dtd_zip_file(token, category)
 
-    print('Writing to database')
-    write_dtd_file_set_to_database(db, path)
-    shutil.rmtree(path)
+        print(f"Extracting '{ fares_zip }'")
+        with ZipFile(path + '/' + fares_zip, 'r') as f:
+            f.extractall(path)
+        os.remove(path + '/' + fares_zip)
+
+        print('Writing to database')
+        write_dtd_file_set_to_database(db, path)
+        shutil.rmtree(path)
 
     print('Finished')
 
