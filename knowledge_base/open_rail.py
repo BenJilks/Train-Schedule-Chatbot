@@ -6,42 +6,12 @@ import urllib.parse
 import os
 import shutil
 from zipfile import ZipFile
-from datetime import date
 
 # FIXME: This should probably be in a config file
 DTD_DATABASE_PATH = 'dtd_data'
 DTD_EXPIRY = 60 * 60 * 24 # 1 day
 CREDENTIALS = ('benjyjilks@gmail.com', '2n3gfJUdxGizAHF%')
     
-def minutes_to_hhmm_format(minutes: int) -> str:
-    return "{:02d}{:02d}".format(minutes // 60, minutes % 60)
-
-def hsp(from_location: str, to_location: str, 
-        time_minutes_range: tuple[int, int], 
-        date_range: tuple[date, date]) -> object:
-
-    API_URL = 'https://hsp-prod.rockshore.net/api/v1/serviceMetrics'
-    HEADERS = { 'Content-Type': 'application/json' }
-
-    (from_time_minutes, to_time_minutes) = time_minutes_range
-    (from_date, to_date) = date_range
-
-    request_data = {
-      'from_loc': from_location,
-      'to_loc': to_location,
-      'from_time': minutes_to_hhmm_format(from_time_minutes),
-      'to_time': minutes_to_hhmm_format(to_time_minutes),
-      'from_date': from_date.isoformat(),
-      'to_date': to_date.isoformat(),
-      'days': 'WEEKDAY'
-    }
-
-    response = requests.post(API_URL, headers=HEADERS, auth=CREDENTIALS, json=request_data)
-    response_json = json.loads(response.text)
-
-    # TODO: Have this be parsed into a dataclass
-    return response_json
-
 def is_dtd_outdated():
     if not os.path.exists(DTD_DATABASE_PATH):
         return True
