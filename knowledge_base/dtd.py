@@ -1,7 +1,6 @@
 import requests
 import json
 import time
-import sys
 import urllib.parse
 import os
 import tempfile
@@ -9,6 +8,7 @@ import sqlalchemy
 import shutil
 import datetime
 import enum
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm.session import Session, sessionmaker
@@ -100,8 +100,7 @@ def open_dtd_database() -> Session:
     assert isinstance(engine, Engine)
 
     Base.metadata.create_all(engine)
-    Session = sessionmaker(bind = engine)
-    db = Session()
+    db = sessionmaker(bind = engine)()
     update_dtd_database(db)
     return db
 
@@ -140,18 +139,11 @@ def download_dtd_zip_file(token: str, category: str) -> tuple[str, str]:
     path = tempfile.mkdtemp()
 
     print(f"Downloading file '{ filename }' ({ length } bytes)")
-    downloaded = 0
-    progress = 0
     with open(path + '/' + filename, 'wb') as f:
         for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
             f.write(chunk)
-            downloaded += CHUNK_SIZE
-            progress += CHUNK_SIZE
-            if progress / length >= 0.1:
-                print('.', end='')
-                sys.stdout.flush()
-                progress = 0
-    print()
+
+    print(f"Finished downloading '{ filename }'")
     return path, filename
 
 def record_for_loc_entry(entry: str) -> tuple[type[Base], dict, int] | None:
@@ -271,11 +263,10 @@ def record_for_entry(file: str, entry: str) -> tuple[type[Base], dict, int] | No
         return record_for_mca_entry(entry)
     return None
 
-def write_dtd_file_to_database(db: Session, path: str, file: str):
-    print(f"Writing '{ file }'")
+def records_in_dtd_file(path: str, file: str) -> dict[type[Base], list[dict]]:
+    print(f"Reading '{ file }'")
     records: dict[type[Base], tuple[list[dict], set[int]]] = {}
     with open(path + '/' + file, 'r') as f:
-        print('  Reading entries')
         for entry in f:
             result = record_for_entry(file, entry)
             if result is None:
@@ -289,29 +280,25 @@ def write_dtd_file_to_database(db: Session, path: str, file: str):
             if not hash_value in hashes:
                 table_records.append(record)
                 hashes.add(hash_value)
-    
-    print('  Flushing to database')
-    for table, record_set in records.items():
-        entries, _ = record_set
-        db.bulk_insert_mappings(table, entries)
-    db.commit()
+    return { table: entries for table, (entries, _) in records.items() }
 
-def write_dtd_file_set_to_database(db: Session, path: str):
-    db.query(Metadata).delete()
-    db.query(FareRecord).delete()
-    db.query(FlowRecord).delete()
-    db.query(LocationRecord).delete()
-    db.query(TicketType).delete()
-    db.query(TimetableLocation).delete()
-
+def records_in_dtd_file_set(executor: ThreadPoolExecutor, path: str):
+    tasks = []
     for file in os.listdir(path):
         if not file[-3:] in ['LOC', 'FFL', 'TTY', 'MCA']:
             continue
-        write_dtd_file_to_database(db, path, file)
+        tasks.append(executor.submit(
+            lambda *args: (*args, records_in_dtd_file(*args)), path, file))
+    return tasks
 
-    now = int(time.time())
-    db.add(Metadata(last_updated = now))
-    db.commit()
+def download_dtd_category(token: str, category: str) -> str:
+    path, zip_file = download_dtd_zip_file(token, category)
+
+    print(f"Extracting '{ zip_file }'")
+    with ZipFile(path + '/' + zip_file, 'r') as f:
+        f.extractall(path)
+    os.remove(path + '/' + zip_file)
+    return path
 
 def update_dtd_database(db: Session):
     if not is_dtd_outdated(db):
@@ -320,17 +307,39 @@ def update_dtd_database(db: Session):
     print('Updating DTD database')
     token = generate_dtd_token()
 
-    for category in ['2.0/fares', '3.0/timetable']:
-        path, fares_zip = download_dtd_zip_file(token, category)
+    db.query(Metadata).delete()
+    db.query(FareRecord).delete()
+    db.query(FlowRecord).delete()
+    db.query(LocationRecord).delete()
+    db.query(TicketType).delete()
+    db.query(TimetableLocation).delete()
 
-        print(f"Extracting '{ fares_zip }'")
-        with ZipFile(path + '/' + fares_zip, 'r') as f:
-            f.extractall(path)
-        os.remove(path + '/' + fares_zip)
+    with ThreadPoolExecutor() as executor:
+        download_tasks = []
+        for category in ['2.0/fares', '3.0/timetable']:
+            download_tasks.append(executor.submit(download_dtd_category, token, category))
 
-        print('Writing to database')
-        write_dtd_file_set_to_database(db, path)
-        shutil.rmtree(path)
+        write_tasks = []
+        paths = []
+        for task in as_completed(download_tasks):
+            path = task.result()
+            write_tasks += records_in_dtd_file_set(executor, path)
+            paths.append(path)
 
+        for task in as_completed(write_tasks):
+            path, file, records = task.result()
+
+            print(f"Flushing '{ file }' to database")
+            for table, entries in records.items():
+                db.bulk_insert_mappings(table, entries)
+            db.commit()
+
+        # Clean up /tmp directory
+        for path in paths:
+            shutil.rmtree(path)
+
+    now = int(time.time())
+    db.add(Metadata(last_updated = now))
+    db.commit()
     print('Finished')
 
