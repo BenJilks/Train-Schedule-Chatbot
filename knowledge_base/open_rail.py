@@ -1,4 +1,4 @@
-from dtd import FareRecord, FlowRecord, LocationRecord
+from knowledge_base.dtd import FareRecord, FlowRecord, LocationRecord
 from sqlalchemy.orm.util import aliased
 from sqlalchemy.orm.session import Session
 
