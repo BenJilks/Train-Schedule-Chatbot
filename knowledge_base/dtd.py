@@ -81,7 +81,7 @@ class TimetableLocation(Base):
     __tablename__ = 'timetable_location'
     id = Column(Integer, Identity(start=0), primary_key=True)
     location_type = Column(Enum(TimetableLocationType))
-    location = Column(String(8))
+    location = Column(String(8), ForeignKey('tiploc.tiploc_code'))
     scheduled_arrival_time = Column(Time)
     scheduled_departure_time = Column(Time)
     scheduled_pass = Column(Time)
@@ -94,6 +94,13 @@ class TimetableLocation(Base):
     engineering_allowance = Column(String(2))
     pathing_allowance = Column(String(2))
     performance_allowance = Column(String(2))
+
+class TIPLOC(Base):
+    __tablename__ = 'tiploc'
+    id = Column(Integer, Identity(start=0), primary_key=True)
+    tiploc_code = Column(String(7))
+    crs_code = Column(String(3))
+    description = Column(Text)
 
 def open_dtd_database() -> Session:
     engine = sqlalchemy.create_engine('sqlite:///dtd.db')
@@ -250,6 +257,11 @@ def record_for_mca_entry(entry: str) -> tuple[type[Base], dict, int] | None:
             platform = entry[19:22].strip(),
             path = entry[22:25].strip(),
             activity = entry[25:37].strip()), hash(entry)
+    if entry_type == 'TI':
+        return TIPLOC, dict(
+            tiploc_code = entry[2:9].strip(),
+            crs_code = entry[53:56],
+            description = entry[56:72].strip()), hash(entry)
     return None
 
 def record_for_entry(file: str, entry: str) -> tuple[type[Base], dict, int] | None:
@@ -313,6 +325,7 @@ def update_dtd_database(db: Session):
     db.query(LocationRecord).delete()
     db.query(TicketType).delete()
     db.query(TimetableLocation).delete()
+    db.query(TIPLOC).delete()
 
     with ThreadPoolExecutor() as executor:
         download_tasks = []
