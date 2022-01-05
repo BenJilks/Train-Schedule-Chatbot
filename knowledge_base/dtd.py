@@ -262,11 +262,13 @@ def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, in
     if entry_type == 'LO':
         assert isinstance(state.current_train, str)
         state.train_route_index += 1
+        train_uid = state.current_train
+        location = entry[2:10].strip()
         return TimetableLocation, dict(
-            train_uid = state.current_train,
+            train_uid = train_uid,
             train_route_index = state.train_route_index - 1,
             location_type = TimetableLocationType.Origin,
-            location = entry[2:10].strip(),
+            location = location,
             scheduled_departure_time = parse_time(entry[10:15]),
             public_departure = parse_time(entry[15:19]),
             platform = entry[19:22].strip(),
@@ -274,15 +276,17 @@ def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, in
             engineering_allowance = entry[25:27].strip(),
             pathing_allowance = entry[27:29].strip(),
             activity = entry[39:41].strip(),
-            performance_allowance = entry[41:43].strip()), hash(entry)
+            performance_allowance = entry[41:43].strip()), hash((train_uid, location))
     if entry_type == 'LI':
         assert isinstance(state.current_train, str)
         state.train_route_index += 1
+        train_uid = state.current_train
+        location = entry[2:10].strip()
         return TimetableLocation, dict(
-            train_uid = state.current_train,
+            train_uid = train_uid,
             train_route_index = state.train_route_index - 1,
             location_type = TimetableLocationType.Intermediate,
-            location = entry[2:10].strip(),
+            location = location,
             scheduled_arrival_time = parse_time(entry[10:15]),
             scheduled_departure_time = parse_time(entry[15:20]),
             scheduled_pass = parse_time(entry[20:25]),
@@ -294,22 +298,23 @@ def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, in
             activity = entry[42:54].strip(),
             engineering_allowance = entry[54:56].strip(),
             pathing_allowance = entry[56:58].strip(),
-            performance_allowance = entry[58:60].strip()), hash(entry)
+            performance_allowance = entry[58:60].strip()), hash((train_uid, location))
     if entry_type == 'LT':
         assert isinstance(state.current_train, str)
         train_uid = state.current_train
         train_route_index = state.train_route_index
+        location = entry[2:10].strip()
         state.reset()
         return TimetableLocation, dict(
             train_uid = train_uid,
             train_route_index = train_route_index,
             location_type = TimetableLocationType.Terminating,
-            location = entry[2:10].strip(),
+            location = location,
             scheduled_arrival_time = parse_time(entry[10:15]),
             public_arrival = parse_time(entry[15:19]),
             platform = entry[19:22].strip(),
             path = entry[22:25].strip(),
-            activity = entry[25:37].strip()), hash(entry)
+            activity = entry[25:37].strip()), hash((train_uid, location))
     if entry_type == 'TI':
         return TIPLOC, dict(
             tiploc_code = entry[2:9].strip(),
