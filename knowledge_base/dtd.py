@@ -374,14 +374,8 @@ def download_dtd_category(token: str, category: str) -> str:
     return path
 
 def clear_dtd_database(db: Session):
-    db.query(Metadata).delete()
-    db.query(FareRecord).delete()
-    db.query(FlowRecord).delete()
-    db.query(LocationRecord).delete()
-    db.query(TicketType).delete()
-    db.query(TimetableLocation).delete()
-    db.query(TrainTimetable).delete()
-    db.query(TIPLOC).delete()
+    for table in Base.metadata.sorted_tables:
+        db.query(table).delete()
 
 def update_dtd_database(db: Session):
     global update_lock
