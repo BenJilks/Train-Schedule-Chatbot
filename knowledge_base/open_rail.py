@@ -20,10 +20,10 @@ def station_timetable(db: Session, from_location: str, to_location: str,
             next_station.train_route_index == TimetableLocation.train_route_index + 1))\
         .join(from_tiploc, from_tiploc.tiploc_code == TimetableLocation.location)\
         .join(to_tiploc, to_tiploc.tiploc_code == next_station.location, isouter=True)\
-        .filter(from_tiploc.crs_code == from_location)\
-        .filter(to_tiploc.crs_code == to_location)\
         .filter(date >= TrainTimetable.date_runs_from)\
         .filter(date <= TrainTimetable.date_runs_to)\
+        .filter(from_tiploc.crs_code == from_location)\
+        .filter(to_tiploc.crs_code == to_location)\
         .add_columns(TrainTimetable.days_run)\
         .all()
     return [s for (s, days_run) in result if days_run[current_day] == '1']

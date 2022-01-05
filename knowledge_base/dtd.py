@@ -20,6 +20,8 @@ from sqlalchemy.sql.sqltypes import Boolean, Integer, String, Text
 from sqlalchemy.sql.sqltypes import Date, Enum, Time
 
 # FIXME: This should probably be in a config file
+DATABASE_CONNECTION = 'sqlite:///dtd.db'
+# DATABASE_CONNECTION = 'mysql+pymysql://user:password@localhost/db?charset=utf8mb4'
 DTD_EXPIRY = 60 * 60 * 24 # 1 day
 CREDENTIALS = ('benjyjilks@gmail.com', '2n3gfJUdxGizAHF%')
 CHUNK_SIZE = 1024 * 1024 # 1MB
@@ -33,26 +35,26 @@ class Metadata(Base):
 
 class LocationRecord(Base):
     __tablename__ = 'location_record'
-    uic_code = Column(String(7), primary_key=True)
-    ncl_code = Column(String(4))
+    uic_code = Column(String(7), index=True, primary_key=True)
+    ncl_code = Column(String(4), index=True, unique=True)
     crs_code = Column(String(3))
 
 class FlowRecord(Base):
     __tablename__ = 'flow_record'
-    flow_id = Column(String(7), primary_key=True)
+    flow_id = Column(String(7), index=True, primary_key=True)
     origin_code = Column(String(4), ForeignKey('location_record.ncl_code'))
     destination_code = Column(String(4), ForeignKey('location_record.ncl_code'))
     direction = Column(String(1))
 
 class FareRecord(Base):
     __tablename__ = 'fare_record'
-    flow_id = Column(String(7), ForeignKey('flow_record.flow_id'), primary_key=True)
-    ticket_code = Column(String(3), ForeignKey('ticket_type.ticket_code'), primary_key=True)
+    flow_id = Column(String(7), ForeignKey('flow_record.flow_id'), index=True, primary_key=True)
+    ticket_code = Column(String(3), ForeignKey('ticket_type.ticket_code'), index=True, primary_key=True)
     fare = Column(Integer)
 
 class TicketType(Base):
     __tablename__ = 'ticket_type'
-    ticket_code = Column(String(3), primary_key=True)
+    ticket_code = Column(String(3), index=True, primary_key=True)
     description = Column(Text)
     tkt_class = Column(Integer)
     tkt_type = Column(String(1))
@@ -78,7 +80,7 @@ class TicketType(Base):
 
 class TrainTimetable(Base):
     __tablename__ = 'train_timetable'
-    train_uid = Column(String(6), primary_key=True)
+    train_uid = Column(String(6), index=True, primary_key=True)
     date_runs_from = Column(Date)
     date_runs_to = Column(Date)
     days_run = Column(String(7))
@@ -91,9 +93,9 @@ class TimetableLocationType(enum.Enum):
 
 class TimetableLocation(Base):
     __tablename__ = 'timetable_location'
-    id = Column(Integer, Identity(start=0), primary_key=True)
-    train_uid = Column(String(6), ForeignKey('train_timetable.train_uid'))
-    train_route_index = Column(Integer)
+    id = Column(Integer, Identity(start=0), index=True, primary_key=True)
+    train_uid = Column(String(6), ForeignKey('train_timetable.train_uid'), index=True)
+    train_route_index = Column(Integer, index=True)
     location_type = Column(Enum(TimetableLocationType))
     location = Column(String(8), ForeignKey('tiploc.tiploc_code'))
     scheduled_arrival_time = Column(Time)
@@ -111,13 +113,13 @@ class TimetableLocation(Base):
 
 class TIPLOC(Base):
     __tablename__ = 'tiploc'
-    id = Column(Integer, Identity(start=0), primary_key=True)
-    tiploc_code = Column(String(7))
+    id = Column(Integer, Identity(start=0), index=True, primary_key=True)
+    tiploc_code = Column(String(7), index=True, unique=True)
     crs_code = Column(String(3))
     description = Column(Text)
 
 def open_dtd_database() -> Session:
-    engine = sqlalchemy.create_engine('sqlite:///dtd.db')
+    engine = sqlalchemy.create_engine(DATABASE_CONNECTION)
     assert isinstance(engine, Engine)
 
     Base.metadata.create_all(engine)
