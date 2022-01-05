@@ -13,11 +13,6 @@ class TestOpenRail(unittest.TestCase):
     def test_station_timetable(self):
         db = open_dtd_database()
         date = datetime.date(2022, 1, 4)
-        timetable = station_timetable(db, 'BTN', date)
+        timetable = station_timetable(db, 'BTN', 'PRP', date)
         self.assertGreater(len(timetable), 0)
-
-        times = [x.scheduled_arrival_time 
-                for x in timetable 
-                if not x.scheduled_arrival_time is None]
-        self.assertGreater(len(times), 0)
 
