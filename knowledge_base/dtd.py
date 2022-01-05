@@ -9,12 +9,15 @@ import shutil
 import datetime
 import enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+from zipfile import ZipFile
+from dataclasses import dataclass
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm.session import Session, sessionmaker
 from sqlalchemy.sql.schema import Column, ForeignKey, Identity
-from sqlalchemy.sql.sqltypes import Boolean, Enum, Integer, String, Text, Time
-from zipfile import ZipFile
+from sqlalchemy.sql.sqltypes import Boolean, Integer, String, Text
+from sqlalchemy.sql.sqltypes import Date, Enum, Time
 
 # FIXME: This should probably be in a config file
 DTD_EXPIRY = 60 * 60 * 24 # 1 day
@@ -22,6 +25,7 @@ CREDENTIALS = ('benjyjilks@gmail.com', '2n3gfJUdxGizAHF%')
 CHUNK_SIZE = 1024 * 1024 # 1MB
 
 Base = declarative_base()
+update_lock = Lock()
 
 class Metadata(Base):
     __tablename__ = 'metadata'
@@ -72,6 +76,14 @@ class TicketType(Base):
     fare_multiplier = Column(Integer)
     discount_category = Column(String(2))
 
+class TrainTimetable(Base):
+    __tablename__ = 'train_timetable'
+    train_uid = Column(String(6), primary_key=True)
+    date_runs_from = Column(Date)
+    date_runs_to = Column(Date)
+    days_run = Column(String(7))
+    bank_holiday_running = Column(Boolean)
+
 class TimetableLocationType(enum.Enum):
     Origin = enum.auto()
     Intermediate = enum.auto()
@@ -80,6 +92,8 @@ class TimetableLocationType(enum.Enum):
 class TimetableLocation(Base):
     __tablename__ = 'timetable_location'
     id = Column(Integer, Identity(start=0), primary_key=True)
+    train_uid = Column(String(6), ForeignKey('train_timetable.train_uid'))
+    train_route_index = Column(Integer)
     location_type = Column(Enum(TimetableLocationType))
     location = Column(String(8), ForeignKey('tiploc.tiploc_code'))
     scheduled_arrival_time = Column(Time)
@@ -218,10 +232,39 @@ def parse_time(time_str: str) -> datetime.time:
     minute = 0 if minute_str == '  ' else int(minute_str)
     return datetime.time(hour=hour, minute=minute)
 
-def record_for_mca_entry(entry: str) -> tuple[type[Base], dict, int] | None:
+def parse_date(date_str: str) -> datetime.date:
+    assert len(date_str) >= 6
+    year = 2000 + int(date_str[:2])
+    month = int(date_str[2:4])
+    day = int(date_str[4:6])
+    return datetime.date(year, month, day)
+
+@dataclass
+class State:
+    current_train: str | None = None
+    train_route_index: int = 0
+
+    def reset(self):
+        self.current_train = None
+        self.train_route_index = 0
+
+def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, int] | None:
     entry_type = entry[:2]
+    if entry_type == 'BS':
+        train_uid = entry[3:9]
+        state.current_train = train_uid
+        return TrainTimetable, dict(
+            train_uid = train_uid,
+            date_runs_from = parse_date(entry[9:15]),
+            date_runs_to = parse_date(entry[15:21]),
+            days_run = entry[21:28],
+            bank_holiday_running = (entry[28] == 'Y')), hash(train_uid)
     if entry_type == 'LO':
+        assert isinstance(state.current_train, str)
+        state.train_route_index += 1
         return TimetableLocation, dict(
+            train_uid = state.current_train,
+            train_route_index = state.train_route_index - 1,
             location_type = TimetableLocationType.Origin,
             location = entry[2:10].strip(),
             scheduled_departure_time = parse_time(entry[10:15]),
@@ -233,7 +276,11 @@ def record_for_mca_entry(entry: str) -> tuple[type[Base], dict, int] | None:
             activity = entry[39:41].strip(),
             performance_allowance = entry[41:43].strip()), hash(entry)
     if entry_type == 'LI':
+        assert isinstance(state.current_train, str)
+        state.train_route_index += 1
         return TimetableLocation, dict(
+            train_uid = state.current_train,
+            train_route_index = state.train_route_index - 1,
             location_type = TimetableLocationType.Intermediate,
             location = entry[2:10].strip(),
             scheduled_arrival_time = parse_time(entry[10:15]),
@@ -249,8 +296,14 @@ def record_for_mca_entry(entry: str) -> tuple[type[Base], dict, int] | None:
             pathing_allowance = entry[56:58].strip(),
             performance_allowance = entry[58:60].strip()), hash(entry)
     if entry_type == 'LT':
+        assert isinstance(state.current_train, str)
+        train_uid = state.current_train
+        train_route_index = state.train_route_index
+        state.reset()
         return TimetableLocation, dict(
-            location_type = TimetableLocationType.Origin,
+            train_uid = train_uid,
+            train_route_index = train_route_index,
+            location_type = TimetableLocationType.Terminating,
             location = entry[2:10].strip(),
             scheduled_arrival_time = parse_time(entry[10:15]),
             public_arrival = parse_time(entry[15:19]),
@@ -264,7 +317,7 @@ def record_for_mca_entry(entry: str) -> tuple[type[Base], dict, int] | None:
             description = entry[56:72].strip()), hash(entry)
     return None
 
-def record_for_entry(file: str, entry: str) -> tuple[type[Base], dict, int] | None:
+def record_for_entry(file: str, entry: str, state: State) -> tuple[type[Base], dict, int] | None:
     if file.endswith('LOC'):
         return record_for_loc_entry(entry)
     if file.endswith('FFL'):
@@ -272,15 +325,16 @@ def record_for_entry(file: str, entry: str) -> tuple[type[Base], dict, int] | No
     if file.endswith('TTY'):
         return record_for_tty_entry(entry)
     if file.endswith('MCA'):
-        return record_for_mca_entry(entry)
+        return record_for_mca_entry(entry, state)
     return None
 
 def records_in_dtd_file(path: str, file: str) -> dict[type[Base], list[dict]]:
     print(f"Reading '{ file }'")
     records: dict[type[Base], tuple[list[dict], set[int]]] = {}
     with open(path + '/' + file, 'r') as f:
+        state = State()
         for entry in f:
-            result = record_for_entry(file, entry)
+            result = record_for_entry(file, entry, state)
             if result is None:
                 continue
 
@@ -312,25 +366,34 @@ def download_dtd_category(token: str, category: str) -> str:
     os.remove(path + '/' + zip_file)
     return path
 
-def update_dtd_database(db: Session):
-    if not is_dtd_outdated(db):
-        return
-
-    print('Updating DTD database')
-    token = generate_dtd_token()
-
+def clear_dtd_database(db: Session):
     db.query(Metadata).delete()
     db.query(FareRecord).delete()
     db.query(FlowRecord).delete()
     db.query(LocationRecord).delete()
     db.query(TicketType).delete()
     db.query(TimetableLocation).delete()
+    db.query(TrainTimetable).delete()
     db.query(TIPLOC).delete()
 
-    with ThreadPoolExecutor() as executor:
+def update_dtd_database(db: Session):
+    global update_lock
+    update_lock.acquire()
+
+    if not is_dtd_outdated(db):
+        update_lock.release()
+        return
+
+    print('Updating DTD database')
+    token = generate_dtd_token()
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
         download_tasks = []
         for category in ['2.0/fares', '3.0/timetable']:
             download_tasks.append(executor.submit(download_dtd_category, token, category))
+
+        # Clear alongside downloading
+        clear_dtd_database(db)
 
         write_tasks = []
         paths = []
@@ -354,5 +417,6 @@ def update_dtd_database(db: Session):
     now = int(time.time())
     db.add(Metadata(last_updated = now))
     db.commit()
+    update_lock.release()
     print('Finished')
 
