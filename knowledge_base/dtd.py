@@ -22,7 +22,6 @@ from sqlalchemy.orm.session import Session, sessionmaker
 from sqlalchemy.sql.schema import Column, ForeignKey, Identity
 from sqlalchemy.sql.sqltypes import Boolean, Integer, String, Text
 from sqlalchemy.sql.sqltypes import Date, Enum, Time
-
 from knowledge_base.progress import Progress
 
 # FIXME: This should probably be in a config file
@@ -219,14 +218,16 @@ class State:
     current_train: dict | None = None
     train_route_index: int = 0
     has_terminated: bool = False
+    has_extra_details_record: bool = False
 
     expired_flow_ids: set[int] = field(default_factory=set)
-    duplicate_trains: set[int] = field(default_factory=set)
+    duplicate_trains: set[str] = field(default_factory=set)
 
     def reset(self):
         self.current_train = None
         self.train_route_index = 0
         self.has_terminated = False
+        self.has_extra_details_record = False
 
 def record_for_loc_entry(entry: str, _: State) -> Iterator[tuple[type[Base], dict]]:
     entry_type = entry[:2]
@@ -319,15 +320,30 @@ def record_for_mca_entry(entry: str, state: State) -> Iterator[Record]:
     entry_type = entry[:2]
     if entry_type == 'BS':
         state.reset()
+
+        train_uid = entry[3:9]
+        if train_uid in state.duplicate_trains:
+            return
+
+        state.duplicate_trains.add(train_uid)
         state.current_train = dict(
-            train_uid = entry[3:9],
+            train_uid = train_uid,
             date_runs_from = parse_date_yymmdd(entry[9:15]),
             date_runs_to = parse_date_yymmdd(entry[15:21]),
             days_run = entry[21:28],
             bank_holiday_running = (entry[28] == 'Y'))
 
+    elif entry_type == 'BX':
+        if state.current_train is None:
+            return
+
+        assert not state.has_extra_details_record
+        state.has_extra_details_record = True
+
     elif entry_type == 'LO':
-        assert not state.current_train is None
+        if state.current_train is None or not state.has_extra_details_record:
+            return
+
         assert not state.has_terminated
         state.train_route_index += 1
         yield TimetableLocation, dict(
@@ -345,7 +361,9 @@ def record_for_mca_entry(entry: str, state: State) -> Iterator[Record]:
             performance_allowance = entry[41:43].strip())
 
     elif entry_type == 'LI':
-        assert not state.current_train is None
+        if state.current_train is None or not state.has_extra_details_record:
+            return
+        
         assert not state.has_terminated
         state.train_route_index += 1
         yield TimetableLocation, dict(
@@ -367,16 +385,15 @@ def record_for_mca_entry(entry: str, state: State) -> Iterator[Record]:
             performance_allowance = entry[58:60].strip())
 
     elif entry_type == 'LT':
-        assert not state.current_train is None
+        if state.current_train is None or not state.has_extra_details_record:
+            return
+
         assert not state.has_terminated
         state.has_terminated = True
 
-        train_uid = state.current_train['train_uid']
-        if state.duplicate_trains.add(train_uid):
-            yield TrainTimetable, state.current_train
-
+        yield TrainTimetable, state.current_train
         yield TimetableLocation, dict(
-            train_uid = train_uid,
+            train_uid = state.current_train['train_uid'],
             train_route_index = state.train_route_index,
             location_type = TimetableLocationType.Terminating,
             location = entry[2:10].strip(),
