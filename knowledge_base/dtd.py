@@ -11,7 +11,7 @@ import enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from zipfile import ZipFile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm.session import Session, sessionmaker
@@ -35,21 +35,21 @@ class Metadata(Base):
 
 class LocationRecord(Base):
     __tablename__ = 'location_record'
-    uic_code = Column(String(7), index=True, primary_key=True)
+    uic_code = Column(String(7), primary_key=True)
     ncl_code = Column(String(4), index=True, unique=True)
-    crs_code = Column(String(3))
+    crs_code = Column(String(3), index=True)
 
 class FlowRecord(Base):
     __tablename__ = 'flow_record'
-    flow_id = Column(String(7), index=True, primary_key=True)
+    flow_id = Column(Integer, index=True, primary_key=True)
     origin_code = Column(String(4), ForeignKey('location_record.ncl_code'))
     destination_code = Column(String(4), ForeignKey('location_record.ncl_code'))
     direction = Column(String(1))
 
 class FareRecord(Base):
     __tablename__ = 'fare_record'
-    flow_id = Column(String(7), ForeignKey('flow_record.flow_id'), index=True, primary_key=True)
-    ticket_code = Column(String(3), ForeignKey('ticket_type.ticket_code'), index=True, primary_key=True)
+    flow_id = Column(Integer, ForeignKey('flow_record.flow_id'), index=True, primary_key=True)
+    ticket_code = Column(String(3), ForeignKey('ticket_type.ticket_code'), primary_key=True)
     fare = Column(Integer)
 
 class TicketType(Base):
@@ -93,7 +93,7 @@ class TimetableLocationType(enum.Enum):
 
 class TimetableLocation(Base):
     __tablename__ = 'timetable_location'
-    id = Column(Integer, Identity(start=0), index=True, primary_key=True)
+    id = Column(Integer, Identity(start=0), primary_key=True)
     train_uid = Column(String(6), ForeignKey('train_timetable.train_uid'), index=True)
     train_route_index = Column(Integer, index=True)
     location_type = Column(Enum(TimetableLocationType))
@@ -113,7 +113,7 @@ class TimetableLocation(Base):
 
 class TIPLOC(Base):
     __tablename__ = 'tiploc'
-    id = Column(Integer, Identity(start=0), index=True, primary_key=True)
+    id = Column(Integer, Identity(start=0), primary_key=True)
     tiploc_code = Column(String(7), index=True, unique=True)
     crs_code = Column(String(3))
     description = Column(Text)
@@ -169,6 +169,28 @@ def download_dtd_zip_file(token: str, category: str) -> tuple[str, str]:
     print(f"Finished downloading '{ filename }'")
     return path, filename
 
+def parse_time(time_str: str) -> datetime.time:
+    assert len(time_str) >= 4
+    hour_str = time_str[:2]
+    minute_str = time_str[2:4]
+    hour = 0 if hour_str == '  ' else int(hour_str)
+    minute = 0 if minute_str == '  ' else int(minute_str)
+    return datetime.time(hour=hour, minute=minute)
+
+def parse_date_yymmdd(date_str: str) -> datetime.date:
+    assert len(date_str) >= 6
+    year = 2000 + int(date_str[:2])
+    month = int(date_str[2:4])
+    day = int(date_str[4:6])
+    return datetime.date(year, month, day)
+
+def parse_date_ddmmyyyy(date_str: str) -> datetime.date:
+    assert len(date_str) >= 8
+    day = int(date_str[:2])
+    month = int(date_str[2:4])
+    year = int(date_str[4:8])
+    return datetime.date(year, month, day)
+
 def record_for_loc_entry(entry: str) -> tuple[type[Base], dict, int] | None:
     entry_type = entry[:2]
     if entry_type == 'RL':
@@ -179,27 +201,65 @@ def record_for_loc_entry(entry: str) -> tuple[type[Base], dict, int] | None:
             crs_code = entry[56:59]), hash(uic_code)
     return None
 
-def record_for_ffl_entry(entry: str) -> tuple[type[Base], dict, int] | None:
+@dataclass
+class State:
+    current_train: str | None = None
+    train_route_index: int = 0
+    expired_flow_ids: set[int] = field(default_factory=set)
+
+    def reset(self):
+        self.current_train = None
+        self.train_route_index = 0
+
+def has_entry_expired(start: datetime.date, end: datetime.date) -> bool:
+    if datetime.date.today() < start:
+        return True
+
+    # NOTE: This means there is no end date
+    if end.year >= 2999:
+        return False
+    if datetime.date.today() > end:
+        return True
+    return False
+
+def record_for_ffl_entry(entry: str, state: State) -> tuple[type[Base], dict, int] | None:
     entry_type = entry[:2]
     if entry_type == 'RF':
-        flow_id = entry[42:49]
+        flow_id = int(entry[42:49])
+        end_date = parse_date_ddmmyyyy(entry[20:28])
+        start_date = parse_date_ddmmyyyy(entry[28:36])
+        if has_entry_expired(start_date, end_date):
+            state.expired_flow_ids.add(flow_id)
+            return None
+
         return FlowRecord, dict(
             flow_id = flow_id,
             origin_code = entry[2:6],
             destination_code = entry[6:10],
             direction = entry[19]), hash(flow_id)
+
     if entry_type == 'RT':
-        flow_id = entry[2:9]
+        flow_id = int(entry[2:9])
+        if flow_id in state.expired_flow_ids:
+            return None
+
+        ticket_code = entry[9:12]
         return FareRecord, dict(
             flow_id = flow_id,
-            ticket_code = entry[9:12],
-            fare = int(entry[12:20])), hash(flow_id)
+            ticket_code = ticket_code,
+            fare = int(entry[12:20])), hash((flow_id, ticket_code))
+
     return None
 
 def record_for_tty_entry(entry: str) -> tuple[type[Base], dict, int] | None:
     entry_type = entry[:1]
     if entry_type == 'R':
         ticket_code = entry[1:4]
+        end_date = parse_date_ddmmyyyy(entry[4:12])
+        start_date = parse_date_ddmmyyyy(entry[12:20])
+        if has_entry_expired(start_date, end_date):
+            return None
+
         return TicketType, dict(
             ticket_code = ticket_code,
             description = entry[28:43].strip(),
@@ -224,31 +284,8 @@ def record_for_tty_entry(entry: str) -> tuple[type[Base], dict, int] | None:
             package_mkr = entry[107],
             fare_multiplier = int(entry[108:111]),
             discount_category = entry[111:113]), hash(ticket_code)
+
     return None
-
-def parse_time(time_str: str) -> datetime.time:
-    assert len(time_str) >= 4
-    hour_str = time_str[:2]
-    minute_str = time_str[2:4]
-    hour = 0 if hour_str == '  ' else int(hour_str)
-    minute = 0 if minute_str == '  ' else int(minute_str)
-    return datetime.time(hour=hour, minute=minute)
-
-def parse_date(date_str: str) -> datetime.date:
-    assert len(date_str) >= 6
-    year = 2000 + int(date_str[:2])
-    month = int(date_str[2:4])
-    day = int(date_str[4:6])
-    return datetime.date(year, month, day)
-
-@dataclass
-class State:
-    current_train: str | None = None
-    train_route_index: int = 0
-
-    def reset(self):
-        self.current_train = None
-        self.train_route_index = 0
 
 def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, int] | None:
     entry_type = entry[:2]
@@ -257,10 +294,11 @@ def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, in
         state.current_train = train_uid
         return TrainTimetable, dict(
             train_uid = train_uid,
-            date_runs_from = parse_date(entry[9:15]),
-            date_runs_to = parse_date(entry[15:21]),
+            date_runs_from = parse_date_yymmdd(entry[9:15]),
+            date_runs_to = parse_date_yymmdd(entry[15:21]),
             days_run = entry[21:28],
             bank_holiday_running = (entry[28] == 'Y')), hash(train_uid)
+
     if entry_type == 'LO':
         assert isinstance(state.current_train, str)
         state.train_route_index += 1
@@ -279,6 +317,7 @@ def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, in
             pathing_allowance = entry[27:29].strip(),
             activity = entry[39:41].strip(),
             performance_allowance = entry[41:43].strip()), hash((train_uid, location))
+
     if entry_type == 'LI':
         assert isinstance(state.current_train, str)
         state.train_route_index += 1
@@ -301,6 +340,7 @@ def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, in
             engineering_allowance = entry[54:56].strip(),
             pathing_allowance = entry[56:58].strip(),
             performance_allowance = entry[58:60].strip()), hash((train_uid, location))
+
     if entry_type == 'LT':
         assert isinstance(state.current_train, str)
         train_uid = state.current_train
@@ -317,18 +357,20 @@ def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, in
             platform = entry[19:22].strip(),
             path = entry[22:25].strip(),
             activity = entry[25:37].strip()), hash((train_uid, location))
+
     if entry_type == 'TI':
         return TIPLOC, dict(
             tiploc_code = entry[2:9].strip(),
             crs_code = entry[53:56],
             description = entry[56:72].strip()), hash(entry)
+
     return None
 
 def record_for_entry(file: str, entry: str, state: State) -> tuple[type[Base], dict, int] | None:
     if file.endswith('LOC'):
         return record_for_loc_entry(entry)
     if file.endswith('FFL'):
-        return record_for_ffl_entry(entry)
+        return record_for_ffl_entry(entry, state)
     if file.endswith('TTY'):
         return record_for_tty_entry(entry)
     if file.endswith('MCA'):
@@ -350,9 +392,11 @@ def records_in_dtd_file(path: str, file: str) -> dict[type[Base], list[dict]]:
                 records[table] = [], set()
 
             table_records, hashes = records[table]
-            if not hash_value in hashes:
-                table_records.append(record)
-                hashes.add(hash_value)
+            if hash_value in hashes:
+                continue
+
+            table_records.append(record)
+            hashes.add(hash_value)
     return { table: entries for table, (entries, _) in records.items() }
 
 def records_in_dtd_file_set(executor: ThreadPoolExecutor, path: str):

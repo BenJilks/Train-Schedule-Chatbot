@@ -26,6 +26,7 @@ def station_timetable(db: Session, from_location: str, to_location: str,
         .filter(to_tiploc.crs_code == to_location)\
         .add_columns(TrainTimetable.days_run)\
         .all()
+
     return [s for (s, days_run) in result if days_run[current_day] == '1']
 
 def ticket_prices(db: Session, from_location: str, to_location: str) -> list[tuple[int, TicketType]]:
@@ -33,16 +34,15 @@ def ticket_prices(db: Session, from_location: str, to_location: str) -> list[tup
     destination = aliased(LocationRecord)
 
     # NOTE: Type checking breaks here for some reason
-    result = db.query(FlowRecord)\
+    result = db.query(FareRecord)\
+        .join(FlowRecord, FlowRecord.flow_id == FareRecord.flow_id)\
         .join(origin, origin.ncl_code == FlowRecord.origin_code)\
         .join(destination, destination.ncl_code == FlowRecord.destination_code)\
-        .join(FareRecord, FareRecord.flow_id == FlowRecord.flow_id)\
         .join(TicketType, TicketType.ticket_code == FareRecord.ticket_code)\
         .filter(origin.crs_code == from_location)\
         .filter(destination.crs_code == to_location)\
-        .add_entity(FareRecord)\
         .add_entity(TicketType)\
         .all()
 
-    return [(fare.fare, ticket) for _, fare, ticket in result]
+    return [(fare.fare, ticket) for fare, ticket in result]
 
