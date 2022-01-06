@@ -27,7 +27,7 @@ from knowledge_base.progress import Progress
 
 # FIXME: This should probably be in a config file
 DATABASE_FILE = 'dtd.db'
-DTD_EXPIRY = 60 * 60 * 24 # 1 day
+DTD_EXPIRY = 60 * 60 * 24 * 365 # 1 year
 CREDENTIALS = ('benjyjilks@gmail.com', '2n3gfJUdxGizAHF%')
 
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024 # 1MB
