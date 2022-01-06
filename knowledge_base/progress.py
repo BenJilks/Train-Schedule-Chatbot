@@ -56,10 +56,15 @@ class Progress:
         return
 
     def report(self, name: str, done: int, out_of: int):
-        with self._mutex:
-            if done >= out_of:
+        # If we don't get the lock, just ignore the report
+        if not self._mutex.acquire(blocking=False):
+            return
+
+        if done >= out_of:
+            if name in self._bars:
                 del self._bars[name]
-            else:
-                self._bars[name] = ProgressBar(done + 1, out_of)
-            self.display()
+        else:
+            self._bars[name] = ProgressBar(done + 1, out_of)
+        self.display()
+        self._mutex.release()
 

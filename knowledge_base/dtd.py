@@ -1,3 +1,4 @@
+import sys
 import requests
 import json
 import time
@@ -8,8 +9,11 @@ import sqlalchemy
 import shutil
 import datetime
 import enum
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+import traceback
+from queue import Queue
+from typing import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor, Executor
+from concurrent.futures import as_completed, wait, FIRST_EXCEPTION
 from zipfile import ZipFile
 from dataclasses import dataclass, field
 from sqlalchemy.engine.base import Engine
@@ -22,14 +26,17 @@ from sqlalchemy.sql.sqltypes import Date, Enum, Time
 from knowledge_base.progress import Progress
 
 # FIXME: This should probably be in a config file
-DATABASE_CONNECTION = 'sqlite:///dtd.db'
-# DATABASE_CONNECTION = 'mysql+pymysql://user:password@localhost/db?charset=utf8mb4'
+DATABASE_FILE = 'dtd.db'
 DTD_EXPIRY = 60 * 60 * 24 # 1 day
 CREDENTIALS = ('benjyjilks@gmail.com', '2n3gfJUdxGizAHF%')
-CHUNK_SIZE = 1024 * 1024 # 1MB
+
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024 # 1MB
+MAX_NUMBER_OF_QUEUED_BATCH_STATEMENTS = 5
+RECORD_CHUNK_SIZE = 1_00_000
+SQL_BATCH_SIZE = 10_00_000
 
 Base = declarative_base()
-update_lock = Lock()
+is_updating = False
 
 class Metadata(Base):
     __tablename__ = 'metadata'
@@ -37,8 +44,9 @@ class Metadata(Base):
 
 class LocationRecord(Base):
     __tablename__ = 'location_record'
-    uic_code = Column(String(7), primary_key=True)
-    ncl_code = Column(String(4), index=True, unique=True)
+    id = Column(Integer, Identity(start=0), primary_key=True)
+    uic_code = Column(String(7))
+    ncl_code = Column(String(4), index=True)
     crs_code = Column(String(3), index=True)
 
 class FlowRecord(Base):
@@ -47,6 +55,8 @@ class FlowRecord(Base):
     origin_code = Column(String(4), ForeignKey('location_record.ncl_code'))
     destination_code = Column(String(4), ForeignKey('location_record.ncl_code'))
     direction = Column(String(1))
+    end_date = Column(Date)
+    start_date = Column(Date)
 
 class FareRecord(Base):
     __tablename__ = 'fare_record'
@@ -121,11 +131,17 @@ class TIPLOC(Base):
     description = Column(Text)
 
 def open_dtd_database() -> Session:
-    engine = sqlalchemy.create_engine(DATABASE_CONNECTION)
+    is_new_database = not os.path.exists(DATABASE_FILE)
+    engine = sqlalchemy.create_engine('sqlite:///' + DATABASE_FILE)
     assert isinstance(engine, Engine)
 
     Base.metadata.create_all(engine)
     db = sessionmaker(bind = engine)()
+    if is_new_database:
+        db.execute('PRAGMA journal_mode=WAL')
+        db.execute('PRAGMA synchronous = NORMAL')
+        db.execute('PRAGMA cache_size = 100000')
+
     update_dtd_database(db)
     return db
 
@@ -166,9 +182,9 @@ def download_dtd_zip_file(token: str, category: str, progress: Progress) -> tupl
     bytes_downloaded = 0
     last_progress_report = 0
     with open(path + '/' + filename, 'wb') as f:
-        for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+        for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
             f.write(chunk)
-            bytes_downloaded += CHUNK_SIZE
+            bytes_downloaded += DOWNLOAD_CHUNK_SIZE
             if time.time() - last_progress_report >= 1:
                 progress.report(filename, bytes_downloaded, length)
                 last_progress_report = time.time()
@@ -198,25 +214,28 @@ def parse_date_ddmmyyyy(date_str: str) -> datetime.date:
     year = int(date_str[4:8])
     return datetime.date(year, month, day)
 
-def record_for_loc_entry(entry: str) -> tuple[type[Base], dict, int] | None:
-    entry_type = entry[:2]
-    if entry_type == 'RL':
-        uic_code = entry[2:9]
-        return LocationRecord, dict(
-            uic_code = uic_code,
-            ncl_code = entry[36:40], 
-            crs_code = entry[56:59]), hash(uic_code)
-    return None
-
 @dataclass
 class State:
-    current_train: str | None = None
+    current_train: dict | None = None
     train_route_index: int = 0
+    has_terminated: bool = False
+
     expired_flow_ids: set[int] = field(default_factory=set)
+    duplicate_trains: set[int] = field(default_factory=set)
 
     def reset(self):
         self.current_train = None
         self.train_route_index = 0
+        self.has_terminated = False
+
+def record_for_loc_entry(entry: str, _: State) -> Iterator[tuple[type[Base], dict]]:
+    entry_type = entry[:2]
+    if entry_type == 'RL':
+        yield LocationRecord, dict(
+            uic_code = entry[2:9],
+            ncl_code = entry[36:40], 
+            crs_code = entry[56:59])
+    return
 
 def has_entry_expired(start: datetime.date, end: datetime.date) -> bool:
     if datetime.date.today() < start:
@@ -229,7 +248,10 @@ def has_entry_expired(start: datetime.date, end: datetime.date) -> bool:
         return True
     return False
 
-def record_for_ffl_entry(entry: str, state: State) -> tuple[type[Base], dict, int] | None:
+Record = tuple[type[Base], dict]
+RecordSet = dict[type[Base], list[dict]]
+
+def record_for_ffl_entry(entry: str, state: State) -> Iterator[Record]:
     entry_type = entry[:2]
     if entry_type == 'RF':
         flow_id = int(entry[42:49])
@@ -237,38 +259,37 @@ def record_for_ffl_entry(entry: str, state: State) -> tuple[type[Base], dict, in
         start_date = parse_date_ddmmyyyy(entry[28:36])
         if has_entry_expired(start_date, end_date):
             state.expired_flow_ids.add(flow_id)
-            return None
+            return
 
-        return FlowRecord, dict(
+        yield FlowRecord, dict(
             flow_id = flow_id,
             origin_code = entry[2:6],
             destination_code = entry[6:10],
-            direction = entry[19]), hash(flow_id)
+            direction = entry[19],
+            end_date = end_date,)
 
-    if entry_type == 'RT':
+    elif entry_type == 'RT':
         flow_id = int(entry[2:9])
         if flow_id in state.expired_flow_ids:
-            return None
+            return
 
-        ticket_code = entry[9:12]
-        return FareRecord, dict(
+        yield FareRecord, dict(
             flow_id = flow_id,
-            ticket_code = ticket_code,
-            fare = int(entry[12:20])), hash((flow_id, ticket_code))
+            ticket_code = entry[9:12],
+            fare = int(entry[12:20]))
 
-    return None
+    return
 
-def record_for_tty_entry(entry: str) -> tuple[type[Base], dict, int] | None:
+def record_for_tty_entry(entry: str, _: State) -> Iterator[Record]:
     entry_type = entry[:1]
     if entry_type == 'R':
-        ticket_code = entry[1:4]
         end_date = parse_date_ddmmyyyy(entry[4:12])
         start_date = parse_date_ddmmyyyy(entry[12:20])
         if has_entry_expired(start_date, end_date):
-            return None
+            return
 
-        return TicketType, dict(
-            ticket_code = ticket_code,
+        yield TicketType, dict(
+            ticket_code = entry[1:4],
             description = entry[28:43].strip(),
             tkt_class = int(entry[43]),
             tkt_type = entry[44],
@@ -290,32 +311,30 @@ def record_for_tty_entry(entry: str) -> tuple[type[Base], dict, int] | None:
             free_pass_lul = entry[106] == 'Y',
             package_mkr = entry[107],
             fare_multiplier = int(entry[108:111]),
-            discount_category = entry[111:113]), hash(ticket_code)
+            discount_category = entry[111:113])
 
-    return None
+    return
 
-def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, int] | None:
+def record_for_mca_entry(entry: str, state: State) -> Iterator[Record]:
     entry_type = entry[:2]
     if entry_type == 'BS':
-        train_uid = entry[3:9]
-        state.current_train = train_uid
-        return TrainTimetable, dict(
-            train_uid = train_uid,
+        state.reset()
+        state.current_train = dict(
+            train_uid = entry[3:9],
             date_runs_from = parse_date_yymmdd(entry[9:15]),
             date_runs_to = parse_date_yymmdd(entry[15:21]),
             days_run = entry[21:28],
-            bank_holiday_running = (entry[28] == 'Y')), hash(train_uid)
+            bank_holiday_running = (entry[28] == 'Y'))
 
-    if entry_type == 'LO':
-        assert isinstance(state.current_train, str)
+    elif entry_type == 'LO':
+        assert not state.current_train is None
+        assert not state.has_terminated
         state.train_route_index += 1
-        train_uid = state.current_train
-        location = entry[2:10].strip()
-        return TimetableLocation, dict(
-            train_uid = train_uid,
+        yield TimetableLocation, dict(
+            train_uid = state.current_train['train_uid'],
             train_route_index = state.train_route_index - 1,
             location_type = TimetableLocationType.Origin,
-            location = location,
+            location = entry[2:10].strip(),
             scheduled_departure_time = parse_time(entry[10:15]),
             public_departure = parse_time(entry[15:19]),
             platform = entry[19:22].strip(),
@@ -323,18 +342,17 @@ def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, in
             engineering_allowance = entry[25:27].strip(),
             pathing_allowance = entry[27:29].strip(),
             activity = entry[39:41].strip(),
-            performance_allowance = entry[41:43].strip()), hash((train_uid, location))
+            performance_allowance = entry[41:43].strip())
 
-    if entry_type == 'LI':
-        assert isinstance(state.current_train, str)
+    elif entry_type == 'LI':
+        assert not state.current_train is None
+        assert not state.has_terminated
         state.train_route_index += 1
-        train_uid = state.current_train
-        location = entry[2:10].strip()
-        return TimetableLocation, dict(
-            train_uid = train_uid,
+        yield TimetableLocation, dict(
+            train_uid = state.current_train['train_uid'],
             train_route_index = state.train_route_index - 1,
             location_type = TimetableLocationType.Intermediate,
-            location = location,
+            location = entry[2:10].strip(),
             scheduled_arrival_time = parse_time(entry[10:15]),
             scheduled_departure_time = parse_time(entry[15:20]),
             scheduled_pass = parse_time(entry[20:25]),
@@ -346,79 +364,89 @@ def record_for_mca_entry(entry: str, state: State) -> tuple[type[Base], dict, in
             activity = entry[42:54].strip(),
             engineering_allowance = entry[54:56].strip(),
             pathing_allowance = entry[56:58].strip(),
-            performance_allowance = entry[58:60].strip()), hash((train_uid, location))
+            performance_allowance = entry[58:60].strip())
 
-    if entry_type == 'LT':
-        assert isinstance(state.current_train, str)
-        train_uid = state.current_train
-        train_route_index = state.train_route_index
-        location = entry[2:10].strip()
-        state.reset()
-        return TimetableLocation, dict(
+    elif entry_type == 'LT':
+        assert not state.current_train is None
+        assert not state.has_terminated
+        state.has_terminated = True
+
+        train_uid = state.current_train['train_uid']
+        if state.duplicate_trains.add(train_uid):
+            yield TrainTimetable, state.current_train
+
+        yield TimetableLocation, dict(
             train_uid = train_uid,
-            train_route_index = train_route_index,
+            train_route_index = state.train_route_index,
             location_type = TimetableLocationType.Terminating,
-            location = location,
+            location = entry[2:10].strip(),
             scheduled_arrival_time = parse_time(entry[10:15]),
             public_arrival = parse_time(entry[15:19]),
             platform = entry[19:22].strip(),
             path = entry[22:25].strip(),
-            activity = entry[25:37].strip()), hash((train_uid, location))
+            activity = entry[25:37].strip())
 
-    if entry_type == 'TI':
-        return TIPLOC, dict(
+    elif entry_type == 'TI':
+        yield TIPLOC, dict(
             tiploc_code = entry[2:9].strip(),
             crs_code = entry[53:56],
-            description = entry[56:72].strip()), hash(entry)
+            description = entry[56:72].strip())
 
-    return None
+    return
 
-def record_for_entry(file: str, entry: str, state: State) -> tuple[type[Base], dict, int] | None:
+def entry_parser_for_file(file: str) -> Callable[[str, State], Iterator[Record]]:
     if file.endswith('LOC'):
-        return record_for_loc_entry(entry)
+        return record_for_loc_entry
     if file.endswith('FFL'):
-        return record_for_ffl_entry(entry, state)
+        return record_for_ffl_entry
     if file.endswith('TTY'):
-        return record_for_tty_entry(entry)
+        return record_for_tty_entry
     if file.endswith('MCA'):
-        return record_for_mca_entry(entry, state)
-    return None
+        return record_for_mca_entry
+    raise Exception(f"Unkown file '{ file }'")
 
-def records_in_dtd_file(path: str, file: str, 
-                        progress: Progress) -> dict[type[Base], list[dict]]:
-    records: dict[type[Base], list[dict]] = {}
+def records_in_dtd_file(chunk_queue: Queue[RecordSet], path: str, file: str, 
+                        progress: Progress):
+    record_chunk: RecordSet = {}
+    record_chunk_count = 0
+
     last_progress_report = 0
     total_size_bytes = os.path.getsize(path + '/' + file)
     bytes_processed = 0
 
+    entry_parser = entry_parser_for_file(file)
     with open(path + '/' + file, 'r') as f:
         state = State()
-        for entry in f:
-            bytes_processed += len(entry)
+        line_no = 0
+        for entry_line in f:
+            line_no += 1
+            bytes_processed += len(entry_line)
             if time.time() - last_progress_report >= 1:
                 progress.report(file, bytes_processed, total_size_bytes)
                 last_progress_report = time.time()
 
-            result = record_for_entry(file, entry, state)
-            if result is None:
+            for table, entry in entry_parser(entry_line, state):
+                record_chunk.setdefault(table, []).append(entry)
+                record_chunk_count += 1
+
+            if record_chunk_count < RECORD_CHUNK_SIZE:
                 continue
+            chunk_queue.put(record_chunk)
+            record_chunk = {}
+            record_chunk_count = 0
 
-            table, record, hash_value = result
-            if not table in records:
-                records[table] = []
-
-            records[table].append(record)
-
+    if record_chunk_count > 0:
+        chunk_queue.put(record_chunk)
     progress.report(file, total_size_bytes, total_size_bytes)
-    return records
 
-def records_in_dtd_file_set(executor: ThreadPoolExecutor, path: str, progress: Progress):
+def records_in_dtd_file_set(executor: Executor, chunk_queue: Queue[RecordSet | None],
+                            path: str, progress: Progress):
     tasks = []
     for file in os.listdir(path):
         if not file[-3:] in ['LOC', 'FFL', 'TTY', 'MCA']:
             continue
-        tasks.append(executor.submit(
-            records_in_dtd_file, path, file, progress))
+        tasks.append(executor.submit(records_in_dtd_file, chunk_queue, path, file, progress))
+
     return tasks
 
 def download_dtd_category(token: str, category: str, progress: Progress) -> str:
@@ -432,49 +460,120 @@ def clear_dtd_database(db: Session):
     for table in Base.metadata.sorted_tables:
         db.query(table).delete()
 
-def update_dtd_database(db: Session):
-    global update_lock
-    update_lock.acquire()
+def report_flushing_progress(progress: Progress, 
+                             written: int, chunk: int, queue_size: int):
+    progress.report('Writing to Disk', 
+        written, 
+        written + chunk + queue_size*RECORD_CHUNK_SIZE)
 
-    if not is_dtd_outdated(db):
-        update_lock.release()
-        return
+def flush_record_chunk(db: Session, record_chunk: RecordSet, 
+                       chunk_count: int, written: int, 
+                       queue_size: int, progress: Progress):
+    report_flushing_progress(progress, written, chunk_count, queue_size)
 
-    print('Updating DTD database')
+    for table, entries in record_chunk.items():
+        db.bulk_insert_mappings(table, entries)
+    
+    report_flushing_progress(progress, written + chunk_count, 0, queue_size)
+
+def batch_and_flush_chunks(db: Session, chunk_queue: Queue[RecordSet | None],
+                           progress: Progress):
+    current_chunk: RecordSet = {}
+    current_chunk_count = 0
+    total_records_being_written = 0
+    for record_chunk in iter(chunk_queue.get, None):
+        for table, entities in record_chunk.items():
+            current_chunk.setdefault(table, []).extend(entities)
+            current_chunk_count += len(entities)
+
+        report_flushing_progress(progress, 
+            total_records_being_written, current_chunk_count, chunk_queue.qsize())
+
+        # Wait for record batch to fill up
+        if current_chunk_count < SQL_BATCH_SIZE:
+            continue
+
+        flush_record_chunk(db, current_chunk, 
+            current_chunk_count, total_records_being_written, 
+            chunk_queue.qsize(), progress)
+
+        total_records_being_written += current_chunk_count
+        current_chunk = {}
+        current_chunk_count = 0
+
+    if current_chunk_count > 0:
+        flush_record_chunk(db, current_chunk, 
+            current_chunk_count, total_records_being_written, 
+            chunk_queue.qsize(), progress)
+    report_flushing_progress(progress, 0, 0, 0)
+
+def create_new_table(db: Session, executor: Executor):
     token = generate_dtd_token()
     progress = Progress()
 
+    download_tasks = []
+    for category in ['2.0/fares', '3.0/timetable']:
+        download_tasks.append(executor.submit(download_dtd_category, token, category, progress))
+
+    # Clear alongside downloading
+    clear_dtd_database(db)
+
+    max_queue_size = int(SQL_BATCH_SIZE / RECORD_CHUNK_SIZE) * MAX_NUMBER_OF_QUEUED_BATCH_STATEMENTS
+    chunk_queue: Queue[RecordSet | None] = Queue(maxsize = max_queue_size)
+
+    write_tasks = []
+    paths = []
+    for task in as_completed(download_tasks):
+        path = task.result()
+        paths.append(path) 
+        write_tasks += records_in_dtd_file_set(
+            executor, chunk_queue, path, progress)
+
+    # Write each chunk synchronously on the main thread
+    def terminate_queue_on_tasks_complete():
+        try:
+            wait(write_tasks, return_when=FIRST_EXCEPTION)
+        except Exception as e:
+            print(Exception, e, file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+
+            chunk_queue.put(None)
+            raise e
+        chunk_queue.put(None)
+    wait_task = executor.submit(terminate_queue_on_tasks_complete)
+
+    # NOTE: We can only run SQL on the main thread
+    batch_and_flush_chunks(db, chunk_queue, progress)
+
+    # Propagate any exceptions
+    wait([wait_task], return_when=FIRST_EXCEPTION)
+
+    # Clean up /tmp directory
+    for path in paths:
+        shutil.rmtree(path)
+
+def update_dtd_database(db: Session):
+    global is_updating
+    if is_updating:
+        return
+
+    if not is_dtd_outdated(db):
+        return
+
+    print('Updating DTD database')
+    is_updating = True
+
     with ThreadPoolExecutor() as executor:
-        download_tasks = []
-        for category in ['2.0/fares', '3.0/timetable']:
-            download_tasks.append(executor.submit(download_dtd_category, token, category, progress))
-
-        # Clear alongside downloading
-        clear_dtd_database(db)
-
-        write_tasks = []
-        paths = []
-        for task in as_completed(download_tasks):
-            path = task.result()
-            write_tasks += records_in_dtd_file_set(executor, path, progress)
-            paths.append(path)
-
-        for i, task in enumerate(as_completed(write_tasks)):
-            records = task.result()
-
-            progress.report('Flushing', i, len(write_tasks))
-            for table, entries in records.items():
-                db.bulk_insert_mappings(table, entries)
-            db.commit()
-        progress.report('Flushing', len(write_tasks), len(write_tasks))
-
-        # Clean up /tmp directory
-        for path in paths:
-            shutil.rmtree(path)
+        try:
+            create_new_table(db, executor)
+        except Exception as e:
+            print(Exception, e, file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            raise e
 
     now = int(time.time())
     db.add(Metadata(last_updated = now))
     db.commit()
-    update_lock.release()
+    is_updating = False
     print('Finished')
 
