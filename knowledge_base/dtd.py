@@ -19,6 +19,8 @@ from sqlalchemy.sql.schema import Column, ForeignKey, Identity
 from sqlalchemy.sql.sqltypes import Boolean, Integer, String, Text
 from sqlalchemy.sql.sqltypes import Date, Enum, Time
 
+from knowledge_base.progress import Progress
+
 # FIXME: This should probably be in a config file
 DATABASE_CONNECTION = 'sqlite:///dtd.db'
 # DATABASE_CONNECTION = 'mysql+pymysql://user:password@localhost/db?charset=utf8mb4'
@@ -148,7 +150,7 @@ def generate_dtd_token() -> str:
     response_json = json.loads(response.text)
     return response_json['token']
 
-def download_dtd_zip_file(token: str, category: str) -> tuple[str, str]:
+def download_dtd_zip_file(token: str, category: str, progress: Progress) -> tuple[str, str]:
     FARES_URL = 'https://opendata.nationalrail.co.uk/api/staticfeeds/' + category
     HEADERS = { 
         'Content-Type': 'application/json',
@@ -161,12 +163,17 @@ def download_dtd_zip_file(token: str, category: str) -> tuple[str, str]:
     filename = disposition.split(';')[-1].split('=')[-1].strip()[1:-1]
     path = tempfile.mkdtemp()
 
-    print(f"Downloading file '{ filename }' ({ length } bytes)")
+    bytes_downloaded = 0
+    last_progress_report = 0
     with open(path + '/' + filename, 'wb') as f:
         for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
             f.write(chunk)
+            bytes_downloaded += CHUNK_SIZE
+            if time.time() - last_progress_report >= 1:
+                progress.report(filename, bytes_downloaded, length)
+                last_progress_report = time.time()
 
-    print(f"Finished downloading '{ filename }'")
+    progress.report(filename, length, length)
     return path, filename
 
 def parse_time(time_str: str) -> datetime.time:
@@ -377,41 +384,45 @@ def record_for_entry(file: str, entry: str, state: State) -> tuple[type[Base], d
         return record_for_mca_entry(entry, state)
     return None
 
-def records_in_dtd_file(path: str, file: str) -> dict[type[Base], list[dict]]:
-    print(f"Reading '{ file }'")
-    records: dict[type[Base], tuple[list[dict], set[int]]] = {}
+def records_in_dtd_file(path: str, file: str, 
+                        progress: Progress) -> dict[type[Base], list[dict]]:
+    records: dict[type[Base], list[dict]] = {}
+    last_progress_report = 0
+    total_size_bytes = os.path.getsize(path + '/' + file)
+    bytes_processed = 0
+
     with open(path + '/' + file, 'r') as f:
         state = State()
         for entry in f:
+            bytes_processed += len(entry)
+            if time.time() - last_progress_report >= 1:
+                progress.report(file, bytes_processed, total_size_bytes)
+                last_progress_report = time.time()
+
             result = record_for_entry(file, entry, state)
             if result is None:
                 continue
 
             table, record, hash_value = result
             if not table in records:
-                records[table] = [], set()
+                records[table] = []
 
-            table_records, hashes = records[table]
-            if hash_value in hashes:
-                continue
+            records[table].append(record)
 
-            table_records.append(record)
-            hashes.add(hash_value)
-    return { table: entries for table, (entries, _) in records.items() }
+    progress.report(file, total_size_bytes, total_size_bytes)
+    return records
 
-def records_in_dtd_file_set(executor: ThreadPoolExecutor, path: str):
+def records_in_dtd_file_set(executor: ThreadPoolExecutor, path: str, progress: Progress):
     tasks = []
     for file in os.listdir(path):
         if not file[-3:] in ['LOC', 'FFL', 'TTY', 'MCA']:
             continue
         tasks.append(executor.submit(
-            lambda *args: (*args, records_in_dtd_file(*args)), path, file))
+            records_in_dtd_file, path, file, progress))
     return tasks
 
-def download_dtd_category(token: str, category: str) -> str:
-    path, zip_file = download_dtd_zip_file(token, category)
-
-    print(f"Extracting '{ zip_file }'")
+def download_dtd_category(token: str, category: str, progress: Progress) -> str:
+    path, zip_file = download_dtd_zip_file(token, category, progress)
     with ZipFile(path + '/' + zip_file, 'r') as f:
         f.extractall(path)
     os.remove(path + '/' + zip_file)
@@ -431,11 +442,12 @@ def update_dtd_database(db: Session):
 
     print('Updating DTD database')
     token = generate_dtd_token()
+    progress = Progress()
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor() as executor:
         download_tasks = []
         for category in ['2.0/fares', '3.0/timetable']:
-            download_tasks.append(executor.submit(download_dtd_category, token, category))
+            download_tasks.append(executor.submit(download_dtd_category, token, category, progress))
 
         # Clear alongside downloading
         clear_dtd_database(db)
@@ -444,16 +456,17 @@ def update_dtd_database(db: Session):
         paths = []
         for task in as_completed(download_tasks):
             path = task.result()
-            write_tasks += records_in_dtd_file_set(executor, path)
+            write_tasks += records_in_dtd_file_set(executor, path, progress)
             paths.append(path)
 
-        for task in as_completed(write_tasks):
-            path, file, records = task.result()
+        for i, task in enumerate(as_completed(write_tasks)):
+            records = task.result()
 
-            print(f"Flushing '{ file }' to database")
+            progress.report('Flushing', i, len(write_tasks))
             for table, entries in records.items():
                 db.bulk_insert_mappings(table, entries)
             db.commit()
+        progress.report('Flushing', len(write_tasks), len(write_tasks))
 
         # Clean up /tmp directory
         for path in paths:
