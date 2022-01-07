@@ -356,6 +356,11 @@ def record_for_mca_entry(entry: str, state: State) -> list[Record]:
     if entry_type == 'LI':
         if state.current_train is None or not state.has_extra_details_record:
             return []
+
+        # Ignore stations we don't stop at
+        scheduled_pass = entry[20:25]
+        if len(scheduled_pass.strip()) != 0:
+            return []
         
         assert not state.has_terminated
         state.train_route_index += 1
@@ -366,7 +371,7 @@ def record_for_mca_entry(entry: str, state: State) -> list[Record]:
             location = entry[2:10].strip(),
             scheduled_arrival_time = parse_time(entry[10:15]),
             scheduled_departure_time = parse_time(entry[15:20]),
-            scheduled_pass = parse_time(entry[20:25]),
+            scheduled_pass = parse_time(scheduled_pass),
             public_arrival = parse_time(entry[25:29]),
             public_departure = parse_time(entry[29:33]),
             platform = entry[33:36].strip(),
