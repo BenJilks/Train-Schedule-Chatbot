@@ -229,14 +229,17 @@ class State:
         self.has_terminated = False
         self.has_extra_details_record = False
 
-def record_for_loc_entry(entry: str, _: State) -> Iterator[tuple[type[Base], dict]]:
+Record = tuple[type[Base], dict]
+RecordSet = dict[type[Base], list[dict]]
+
+def record_for_loc_entry(entry: str, _: State) -> list[Record]:
     entry_type = entry[:2]
     if entry_type == 'RL':
-        yield LocationRecord, dict(
+        return [(LocationRecord, dict(
             uic_code = entry[2:9],
             ncl_code = entry[36:40], 
-            crs_code = entry[56:59])
-    return
+            crs_code = entry[56:59]))]
+    return []
 
 def has_entry_expired(start: datetime.date, end: datetime.date) -> bool:
     if datetime.date.today() < start:
@@ -249,10 +252,7 @@ def has_entry_expired(start: datetime.date, end: datetime.date) -> bool:
         return True
     return False
 
-Record = tuple[type[Base], dict]
-RecordSet = dict[type[Base], list[dict]]
-
-def record_for_ffl_entry(entry: str, state: State) -> Iterator[Record]:
+def record_for_ffl_entry(entry: str, state: State) -> list[Record]:
     entry_type = entry[:2]
     if entry_type == 'RF':
         flow_id = int(entry[42:49])
@@ -260,36 +260,36 @@ def record_for_ffl_entry(entry: str, state: State) -> Iterator[Record]:
         start_date = parse_date_ddmmyyyy(entry[28:36])
         if has_entry_expired(start_date, end_date):
             state.expired_flow_ids.add(flow_id)
-            return
+            return []
 
-        yield FlowRecord, dict(
+        return [(FlowRecord, dict(
             flow_id = flow_id,
             origin_code = entry[2:6],
             destination_code = entry[6:10],
             direction = entry[19],
-            end_date = end_date,)
+            end_date = end_date))]
 
-    elif entry_type == 'RT':
+    if entry_type == 'RT':
         flow_id = int(entry[2:9])
         if flow_id in state.expired_flow_ids:
-            return
+            return []
 
-        yield FareRecord, dict(
+        return [(FareRecord, dict(
             flow_id = flow_id,
             ticket_code = entry[9:12],
-            fare = int(entry[12:20]))
+            fare = int(entry[12:20])))]
 
-    return
+    return []
 
-def record_for_tty_entry(entry: str, _: State) -> Iterator[Record]:
+def record_for_tty_entry(entry: str, _: State) -> list[Record]:
     entry_type = entry[:1]
     if entry_type == 'R':
         end_date = parse_date_ddmmyyyy(entry[4:12])
         start_date = parse_date_ddmmyyyy(entry[12:20])
         if has_entry_expired(start_date, end_date):
-            return
+            return []
 
-        yield TicketType, dict(
+        return [(TicketType, dict(
             ticket_code = entry[1:4],
             description = entry[28:43].strip(),
             tkt_class = int(entry[43]),
@@ -312,18 +312,18 @@ def record_for_tty_entry(entry: str, _: State) -> Iterator[Record]:
             free_pass_lul = entry[106] == 'Y',
             package_mkr = entry[107],
             fare_multiplier = int(entry[108:111]),
-            discount_category = entry[111:113])
+            discount_category = entry[111:113]))]
 
-    return
+    return []
 
-def record_for_mca_entry(entry: str, state: State) -> Iterator[Record]:
+def record_for_mca_entry(entry: str, state: State) -> list[Record]:
     entry_type = entry[:2]
     if entry_type == 'BS':
         state.reset()
 
         train_uid = entry[3:9]
         if train_uid in state.duplicate_trains:
-            return
+            return []
 
         state.duplicate_trains.add(train_uid)
         state.current_train = dict(
@@ -332,21 +332,23 @@ def record_for_mca_entry(entry: str, state: State) -> Iterator[Record]:
             date_runs_to = parse_date_yymmdd(entry[15:21]),
             days_run = entry[21:28],
             bank_holiday_running = (entry[28] == 'Y'))
+        return []
 
-    elif entry_type == 'BX':
+    if entry_type == 'BX':
         if state.current_train is None:
-            return
+            return []
 
         assert not state.has_extra_details_record
         state.has_extra_details_record = True
+        return []
 
-    elif entry_type == 'LO':
+    if entry_type == 'LO':
         if state.current_train is None or not state.has_extra_details_record:
-            return
+            return []
 
         assert not state.has_terminated
         state.train_route_index += 1
-        yield TimetableLocation, dict(
+        return [(TimetableLocation, dict(
             train_uid = state.current_train['train_uid'],
             train_route_index = state.train_route_index - 1,
             location_type = TimetableLocationType.Origin,
@@ -358,15 +360,15 @@ def record_for_mca_entry(entry: str, state: State) -> Iterator[Record]:
             engineering_allowance = entry[25:27].strip(),
             pathing_allowance = entry[27:29].strip(),
             activity = entry[39:41].strip(),
-            performance_allowance = entry[41:43].strip())
+            performance_allowance = entry[41:43].strip()))]
 
-    elif entry_type == 'LI':
+    if entry_type == 'LI':
         if state.current_train is None or not state.has_extra_details_record:
-            return
+            return []
         
         assert not state.has_terminated
         state.train_route_index += 1
-        yield TimetableLocation, dict(
+        return [(TimetableLocation, dict(
             train_uid = state.current_train['train_uid'],
             train_route_index = state.train_route_index - 1,
             location_type = TimetableLocationType.Intermediate,
@@ -382,36 +384,38 @@ def record_for_mca_entry(entry: str, state: State) -> Iterator[Record]:
             activity = entry[42:54].strip(),
             engineering_allowance = entry[54:56].strip(),
             pathing_allowance = entry[56:58].strip(),
-            performance_allowance = entry[58:60].strip())
+            performance_allowance = entry[58:60].strip()))]
 
-    elif entry_type == 'LT':
+    if entry_type == 'LT':
         if state.current_train is None or not state.has_extra_details_record:
-            return
+            return []
 
         assert not state.has_terminated
         state.has_terminated = True
 
-        yield TrainTimetable, state.current_train
-        yield TimetableLocation, dict(
-            train_uid = state.current_train['train_uid'],
-            train_route_index = state.train_route_index,
-            location_type = TimetableLocationType.Terminating,
-            location = entry[2:10].strip(),
-            scheduled_arrival_time = parse_time(entry[10:15]),
-            public_arrival = parse_time(entry[15:19]),
-            platform = entry[19:22].strip(),
-            path = entry[22:25].strip(),
-            activity = entry[25:37].strip())
+        return [
+            (TrainTimetable, state.current_train),
+            (TimetableLocation, dict(
+                train_uid = state.current_train['train_uid'],
+                train_route_index = state.train_route_index,
+                location_type = TimetableLocationType.Terminating,
+                location = entry[2:10].strip(),
+                scheduled_arrival_time = parse_time(entry[10:15]),
+                public_arrival = parse_time(entry[15:19]),
+                platform = entry[19:22].strip(),
+                path = entry[22:25].strip(),
+                activity = entry[25:37].strip()))
+        ]
 
-    elif entry_type == 'TI':
-        yield TIPLOC, dict(
+    if entry_type == 'TI':
+        return [(TIPLOC, dict(
             tiploc_code = entry[2:9].strip(),
             crs_code = entry[53:56],
-            description = entry[56:72].strip())
+            description = entry[56:72].strip()))]
 
-    return
+    return []
 
-def entry_parser_for_file(file: str) -> Callable[[str, State], Iterator[Record]]:
+def entry_parser_for_file(file: str) -> Callable[[str, State], list[Record]]:
     if file.endswith('LOC'):
         return record_for_loc_entry
     if file.endswith('FFL'):
@@ -437,6 +441,7 @@ def records_in_dtd_file(chunk_queue: Queue[RecordSet], path: str, file: str,
         line_no = 0
         for entry_line in f:
             line_no += 1
+
             bytes_processed += len(entry_line)
             if time.time() - last_progress_report >= 1:
                 progress.report(file, bytes_processed, total_size_bytes)
