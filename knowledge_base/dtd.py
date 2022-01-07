@@ -463,6 +463,9 @@ def records_in_dtd_file_set(executor: Executor, chunk_queue: Queue[RecordSet | N
     return tasks
 
 def download_dtd_category(token: str, category: str, progress: Progress) -> str:
+    if config.DISABLE_DOWNLOAD:
+        return config.LOCAL_DTD_STORAGE[category]
+
     path, zip_file = download_dtd_zip_file(token, category, progress)
     with ZipFile(path + '/' + zip_file, 'r') as f:
         f.extractall(path)
@@ -515,13 +518,13 @@ def batch_and_flush_chunks(db: Session, chunk_queue: Queue[RecordSet | None],
         current_chunk_count = 0
 
     if current_chunk_count > 0:
-        flush_record_chunk(db, current_chunk, 
-            current_chunk_count, total_records_being_written, 
+        flush_record_chunk(db, current_chunk,
+            current_chunk_count, total_records_being_written,
             chunk_queue.qsize(), progress)
     report_flushing_progress(progress, 0, 0, 0)
 
 def create_new_table(db: Session, executor: Executor):
-    token = generate_dtd_token()
+    token = '' if config.DISABLE_DOWNLOAD else generate_dtd_token()
     progress = Progress()
 
     download_tasks = []
@@ -560,8 +563,9 @@ def create_new_table(db: Session, executor: Executor):
     wait([wait_task], return_when=FIRST_EXCEPTION)
 
     # Clean up /tmp directory
-    for path in paths:
-        shutil.rmtree(path)
+    if not config.DISABLE_DOWNLOAD:
+        for path in paths:
+            shutil.rmtree(path)
 
 def update_dtd_database(db: Session):
     global is_updating
