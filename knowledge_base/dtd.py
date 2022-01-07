@@ -10,8 +10,9 @@ import shutil
 import datetime
 import enum
 import traceback
+from knowledge_base import config
 from queue import Queue
-from typing import Callable, Iterator
+from typing import Callable
 from concurrent.futures import ThreadPoolExecutor, Executor
 from concurrent.futures import as_completed, wait, FIRST_EXCEPTION
 from zipfile import ZipFile
@@ -23,16 +24,6 @@ from sqlalchemy.sql.schema import Column, ForeignKey, Identity
 from sqlalchemy.sql.sqltypes import Boolean, Integer, String, Text
 from sqlalchemy.sql.sqltypes import Date, Enum, Time
 from knowledge_base.progress import Progress
-
-# FIXME: This should probably be in a config file
-DATABASE_FILE = 'dtd.db'
-DTD_EXPIRY = 60 * 60 * 24 * 365 # 1 year
-CREDENTIALS = ('benjyjilks@gmail.com', '2n3gfJUdxGizAHF%')
-
-DOWNLOAD_CHUNK_SIZE = 1024 * 1024 # 1MB
-MAX_NUMBER_OF_QUEUED_BATCH_STATEMENTS = 5
-RECORD_CHUNK_SIZE = 1_00_000
-SQL_BATCH_SIZE = 10_00_000
 
 Base = declarative_base()
 is_updating = False
@@ -130,8 +121,8 @@ class TIPLOC(Base):
     description = Column(Text)
 
 def open_dtd_database() -> Session:
-    is_new_database = not os.path.exists(DATABASE_FILE)
-    engine = sqlalchemy.create_engine('sqlite:///' + DATABASE_FILE)
+    is_new_database = not os.path.exists(config.DATABASE_FILE)
+    engine = sqlalchemy.create_engine('sqlite:///' + config.DATABASE_FILE)
     assert isinstance(engine, Engine)
 
     Base.metadata.create_all(engine)
@@ -150,7 +141,7 @@ def is_dtd_outdated(db: Session) -> bool:
         return True
 
     age = time.time() - metadata.last_updated
-    if age >= DTD_EXPIRY:
+    if age >= config.DTD_EXPIRY:
         return True
 
     return False
@@ -160,7 +151,7 @@ def generate_dtd_token() -> str:
     HEADERS = { 'Content-Type': 'application/x-www-form-urlencoded' }
 
     response = requests.post(AUTHENTICATE_URL, headers=HEADERS, 
-        data=f"username={ CREDENTIALS[0] }&password={ urllib.parse.quote_plus(CREDENTIALS[1]) }")
+        data=f"username={ config.CREDENTIALS[0] }&password={ urllib.parse.quote_plus(config.CREDENTIALS[1]) }")
 
     response_json = json.loads(response.text)
     return response_json['token']
@@ -181,9 +172,9 @@ def download_dtd_zip_file(token: str, category: str, progress: Progress) -> tupl
     bytes_downloaded = 0
     last_progress_report = 0
     with open(path + '/' + filename, 'wb') as f:
-        for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+        for chunk in response.iter_content(chunk_size=config.DOWNLOAD_CHUNK_SIZE):
             f.write(chunk)
-            bytes_downloaded += DOWNLOAD_CHUNK_SIZE
+            bytes_downloaded += config.DOWNLOAD_CHUNK_SIZE
             if time.time() - last_progress_report >= 1:
                 progress.report(filename, bytes_downloaded, length)
                 last_progress_report = time.time()
@@ -451,7 +442,7 @@ def records_in_dtd_file(chunk_queue: Queue[RecordSet], path: str, file: str,
                 record_chunk.setdefault(table, []).append(entry)
                 record_chunk_count += 1
 
-            if record_chunk_count < RECORD_CHUNK_SIZE:
+            if record_chunk_count < config.RECORD_CHUNK_SIZE:
                 continue
             chunk_queue.put(record_chunk)
             record_chunk = {}
@@ -486,7 +477,7 @@ def report_flushing_progress(progress: Progress,
                              written: int, chunk: int, queue_size: int):
     progress.report('Writing to Disk', 
         written, 
-        written + chunk + queue_size*RECORD_CHUNK_SIZE)
+        written + chunk + queue_size*config.RECORD_CHUNK_SIZE)
 
 def flush_record_chunk(db: Session, record_chunk: RecordSet, 
                        chunk_count: int, written: int, 
@@ -512,7 +503,7 @@ def batch_and_flush_chunks(db: Session, chunk_queue: Queue[RecordSet | None],
             total_records_being_written, current_chunk_count, chunk_queue.qsize())
 
         # Wait for record batch to fill up
-        if current_chunk_count < SQL_BATCH_SIZE:
+        if current_chunk_count < config.SQL_BATCH_SIZE:
             continue
 
         flush_record_chunk(db, current_chunk, 
@@ -540,9 +531,7 @@ def create_new_table(db: Session, executor: Executor):
     # Clear alongside downloading
     clear_dtd_database(db)
 
-    max_queue_size = int(SQL_BATCH_SIZE / RECORD_CHUNK_SIZE) * MAX_NUMBER_OF_QUEUED_BATCH_STATEMENTS
-    chunk_queue: Queue[RecordSet | None] = Queue(maxsize = max_queue_size)
-
+    chunk_queue: Queue[RecordSet | None] = Queue(maxsize = config.MAX_QUEUE_SIZE)
     write_tasks = []
     paths = []
     for task in as_completed(download_tasks):
