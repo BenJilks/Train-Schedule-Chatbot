@@ -6,7 +6,7 @@ from sqlalchemy.orm.util import aliased
 from sqlalchemy.orm.session import Session
 
 def station_timetable(db: Session, from_location: str, to_location: str, 
-                      date: datetime.date) -> list[TimetableLocation]:
+                      date: datetime.date) -> list[tuple[TimetableLocation, TimetableLocation]]:
     current_day = datetime.datetime.now().weekday()
     next_station = aliased(TimetableLocation)
     from_tiploc = aliased(TIPLOC)
@@ -24,10 +24,11 @@ def station_timetable(db: Session, from_location: str, to_location: str,
         .filter(date <= TrainTimetable.date_runs_to)\
         .filter(from_tiploc.crs_code == from_location)\
         .filter(to_tiploc.crs_code == to_location)\
+        .add_entity(next_station)\
         .add_columns(TrainTimetable.days_run)\
         .all()
 
-    return [s for (s, days_run) in result if days_run[current_day] == '1']
+    return [(s, n) for (s, n, days_run) in result if days_run[current_day] == '1']
 
 def ticket_prices(db: Session, from_location: str, to_location: str) -> list[tuple[int, TicketType]]:
     origin = aliased(LocationRecord)
