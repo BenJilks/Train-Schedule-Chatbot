@@ -34,23 +34,22 @@ class Metadata(Base):
 
 class LocationRecord(Base):
     __tablename__ = 'location_record'
-    id = Column(Integer, Identity(start=0), primary_key=True)
+    crs_code = Column(String(3), primary_key=True)
+    ncl_code = Column(String(4), unique=True)
     uic_code = Column(String(7))
-    ncl_code = Column(String(4), index=True)
-    crs_code = Column(String(3), index=True)
 
 class FlowRecord(Base):
     __tablename__ = 'flow_record'
-    flow_id = Column(Integer, index=True, primary_key=True)
-    origin_code = Column(String(4), ForeignKey('location_record.ncl_code'))
-    destination_code = Column(String(4), ForeignKey('location_record.ncl_code'))
+    flow_id = Column(Integer, primary_key=True)
+    origin_code = Column(String(4), ForeignKey('location_record.ncl_code'), index=True)
+    destination_code = Column(String(4), ForeignKey('location_record.ncl_code'), index=True)
     direction = Column(String(1))
     end_date = Column(Date)
     start_date = Column(Date)
 
 class FareRecord(Base):
     __tablename__ = 'fare_record'
-    flow_id = Column(Integer, ForeignKey('flow_record.flow_id'), index=True, primary_key=True)
+    flow_id = Column(Integer, ForeignKey('flow_record.flow_id'), primary_key=True)
     ticket_code = Column(String(3), ForeignKey('ticket_type.ticket_code'), primary_key=True)
     fare = Column(Integer)
 
@@ -99,7 +98,7 @@ class TimetableLocation(Base):
     train_uid = Column(String(6), ForeignKey('train_timetable.train_uid'), index=True)
     train_route_index = Column(Integer, index=True)
     location_type = Column(Enum(TimetableLocationType))
-    location = Column(String(8), ForeignKey('tiploc.tiploc_code'))
+    location = Column(String(8), ForeignKey('tiploc.tiploc_code'), index=True)
     scheduled_arrival_time = Column(Time)
     scheduled_departure_time = Column(Time)
     scheduled_pass = Column(Time)
@@ -115,9 +114,8 @@ class TimetableLocation(Base):
 
 class TIPLOC(Base):
     __tablename__ = 'tiploc'
-    id = Column(Integer, Identity(start=0), primary_key=True)
-    tiploc_code = Column(String(7), index=True, unique=True)
-    crs_code = Column(String(3))
+    tiploc_code = Column(String(7), primary_key=True)
+    crs_code = Column(String(3), unique=True)
     description = Column(Text)
 
 def open_dtd_database() -> Session:
@@ -226,10 +224,19 @@ RecordSet = dict[type[Base], list[dict]]
 def record_for_loc_entry(entry: str, _: State) -> list[Record]:
     entry_type = entry[:2]
     if entry_type == 'RL':
+        end_date = parse_date_ddmmyyyy(entry[9:17])
+        start_date = parse_date_ddmmyyyy(entry[17:25])
+        if has_entry_expired(start_date, end_date):
+            return []
+
+        crs_code = entry[56:59]
+        if len(crs_code.strip()) == 0:
+            return []
+
         return [(LocationRecord, dict(
             uic_code = entry[2:9],
             ncl_code = entry[36:40], 
-            crs_code = entry[56:59]))]
+            crs_code = crs_code))]
     return []
 
 def has_entry_expired(start: datetime.date, end: datetime.date) -> bool:
@@ -404,9 +411,14 @@ def record_for_mca_entry(entry: str, state: State) -> list[Record]:
         ]
 
     if entry_type == 'TI':
+        tiploc_code = entry[2:9].strip()
+        crs_code = entry[53:56]
+        if len(tiploc_code) == 0 or len(crs_code.strip()) == 0:
+            return []
+
         return [(TIPLOC, dict(
-            tiploc_code = entry[2:9].strip(),
-            crs_code = entry[53:56],
+            tiploc_code = tiploc_code,
+            crs_code = crs_code,
             description = entry[56:72].strip()))]
 
     return []
@@ -549,17 +561,19 @@ def create_new_table(db: Session, executor: Executor):
             executor, chunk_queue, path, progress)
 
     # Write each chunk synchronously on the main thread
-    def terminate_queue_on_tasks_complete():
-        try:
-            wait(write_tasks, return_when=FIRST_EXCEPTION)
-        except Exception as e:
+    def terminate_queue_on_tasks_complete(tasks):
+        for result in as_completed(tasks):
+            e = result.exception()
+            if not e:
+                continue
+
             print(Exception, e, file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
 
             chunk_queue.put(None)
             raise e
         chunk_queue.put(None)
-    wait_task = executor.submit(terminate_queue_on_tasks_complete)
+    wait_task = executor.submit(terminate_queue_on_tasks_complete, write_tasks)
 
     # NOTE: We can only run SQL on the main thread
     batch_and_flush_chunks(db, chunk_queue, progress)

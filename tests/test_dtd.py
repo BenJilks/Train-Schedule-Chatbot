@@ -1,6 +1,6 @@
 import datetime
 import unittest
-from knowledge_base.open_rail import ticket_prices, station_timetable
+from knowledge_base.open_rail import ticket_prices, find_routes
 from knowledge_base.dtd import open_dtd_database
 
 class TestOpenRail(unittest.TestCase):
@@ -10,13 +10,16 @@ class TestOpenRail(unittest.TestCase):
         prices = ticket_prices(db, 'BTN', 'PRP')
         self.assertGreater(len(prices), 0)
 
-    def test_station_timetable(self):
+    def test_find_routes(self):
         db = open_dtd_database()
         date = datetime.date(2022, 1, 4)
-        timetable = station_timetable(db, 'BTN', 'PRP', date)
+        routes = find_routes(db, 'BTN', 'PRP', date)
 
-        self.assertGreater(len(timetable), 0)
-        self.assertTrue(all([
-            not next_station is None 
-            for _, next_station in timetable]))
+        self.assertGreater(len(routes), 0)
+        largest_time = None
+        for route in routes:
+            time = route.end.scheduled_arrival_time
+            if not largest_time is None:
+                self.assertGreater(time, largest_time)
+            largest_time = max(time, largest_time or time)
 
