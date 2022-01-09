@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm.session import Session, sessionmaker
-from sqlalchemy.sql.schema import Column, ForeignKey, Identity
+from sqlalchemy.sql.schema import Column, ForeignKey, Index
 from sqlalchemy.sql.sqltypes import Boolean, Integer, String, Text
 from sqlalchemy.sql.sqltypes import Date, Enum, Time
 from knowledge_base.progress import Progress
@@ -94,9 +94,8 @@ class TimetableLocationType(enum.Enum):
 
 class TimetableLocation(Base):
     __tablename__ = 'timetable_location'
-    id = Column(Integer, Identity(start=0), primary_key=True)
-    train_uid = Column(String(6), ForeignKey('train_timetable.train_uid'), index=True)
-    train_route_index = Column(Integer, index=True)
+    train_uid = Column(String(6), ForeignKey('train_timetable.train_uid'), index=True, primary_key=True)
+    train_route_index = Column(Integer, index=True, primary_key=True)
     location_type = Column(Enum(TimetableLocationType))
     location = Column(String(8), ForeignKey('tiploc.tiploc_code'), index=True)
     scheduled_arrival_time = Column(Time)
@@ -111,6 +110,8 @@ class TimetableLocation(Base):
     engineering_allowance = Column(String(2))
     pathing_allowance = Column(String(2))
     performance_allowance = Column(String(2))
+
+Index('train_uid_location', TimetableLocation.train_uid, TimetableLocation.train_route_index, TimetableLocation.location)
 
 class TIPLOC(Base):
     __tablename__ = 'tiploc'
