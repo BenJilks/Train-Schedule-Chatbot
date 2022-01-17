@@ -40,6 +40,11 @@ class LocationRecord(Base):
     ncl_code = Column(String(4), unique=True)
     uic_code = Column(String(7))
 
+class StationCluster(Base):
+    __tablename__ = 'station_cluster'
+    cluster_id = Column(String(4), index=True, primary_key=True)
+    location_nlc = Column(String(4), index=True, primary_key=True)
+
 class FlowRecord(Base):
     __tablename__ = 'flow_record'
     flow_id = Column(Integer, primary_key=True)
@@ -341,6 +346,11 @@ def record_for_ffl_entry(entry: str, state: State) -> list[Record]:
             fare = int(entry[12:20])))]
 
     return []
+
+def record_for_fsc_entry(entry: str, _: State) -> list[Record]:
+    return [(StationCluster, dict(
+        cluster_id = entry[1:5],
+        location_nlc = entry[5:9]))]
 
 def record_for_tty_entry(entry: str, _: State) -> list[Record]:
     entry_type = entry[:1]
