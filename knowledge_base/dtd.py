@@ -10,6 +10,8 @@ import shutil
 import datetime
 import enum
 import traceback
+
+from sqlalchemy.orm.util import aliased
 from knowledge_base import config
 from queue import Queue
 from typing import Callable
@@ -20,9 +22,9 @@ from dataclasses import dataclass, field
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm.session import Session, sessionmaker
-from sqlalchemy.sql.schema import Column, ForeignKey, Index
+from sqlalchemy.sql.schema import Column, ForeignKey
 from sqlalchemy.sql.sqltypes import Boolean, Integer, String, Text
-from sqlalchemy.sql.sqltypes import Date, Enum, Time
+from sqlalchemy.sql.sqltypes import Date, Enum, Time, Float
 from knowledge_base.progress import Progress
 
 Base = declarative_base()
@@ -82,10 +84,29 @@ class TicketType(Base):
 class TrainTimetable(Base):
     __tablename__ = 'train_timetable'
     train_uid = Column(String(6), index=True, primary_key=True)
-    date_runs_from = Column(Date)
-    date_runs_to = Column(Date)
-    days_run = Column(String(7))
+    date_runs_from = Column(Integer)
+    date_runs_to = Column(Integer)
+    monday = Column(Boolean)
+    tuesday = Column(Boolean)
+    wednesday = Column(Boolean)
+    thursday = Column(Boolean)
+    friday = Column(Boolean)
+    saturday = Column(Boolean)
+    sunday = Column(Boolean)
     bank_holiday_running = Column(Boolean)
+
+    @staticmethod
+    def day_to_column(day: int) -> Column:
+        day_index = [
+            TrainTimetable.monday,
+            TrainTimetable.tuesday,
+            TrainTimetable.wednesday,
+            TrainTimetable.thursday,
+            TrainTimetable.friday,
+            TrainTimetable.saturday,
+            TrainTimetable.sunday,
+        ]
+        return day_index[day]
 
 class TimetableLocationType(enum.Enum):
     Origin = enum.auto()
@@ -97,10 +118,9 @@ class TimetableLocation(Base):
     train_uid = Column(String(6), ForeignKey('train_timetable.train_uid'), index=True, primary_key=True)
     train_route_index = Column(Integer, index=True, primary_key=True)
     location_type = Column(Enum(TimetableLocationType))
-    location = Column(String(8), ForeignKey('tiploc.tiploc_code'), index=True)
-    scheduled_arrival_time = Column(Time)
-    scheduled_departure_time = Column(Time)
-    scheduled_pass = Column(Time)
+    location = Column(String(7), ForeignKey('tiploc.tiploc_code'), index=True)
+    scheduled_arrival_time = Column(Integer)
+    scheduled_departure_time = Column(Integer)
     public_arrival = Column(Time)
     public_departure = Column(Time)
     platform = Column(String(3))
@@ -111,13 +131,42 @@ class TimetableLocation(Base):
     pathing_allowance = Column(String(2))
     performance_allowance = Column(String(2))
 
-Index('train_uid_location', TimetableLocation.train_uid, TimetableLocation.train_route_index, TimetableLocation.location)
+class TimetableLink(Base):
+    __tablename__ = 'timetable_link'
+    from_location = Column(String(7), index=True, primary_key=True)
+    to_location = Column(String(7), index=True, primary_key=True)
 
 class TIPLOC(Base):
     __tablename__ = 'tiploc'
     tiploc_code = Column(String(7), primary_key=True)
-    crs_code = Column(String(3), unique=True)
+    crs_code = Column(String(3), primary_key=True)
     description = Column(Text)
+
+class Station(Base):
+    __tablename__ = 'station'
+    location_crs = Column(String(3), index=True, primary_key=True)
+    station_group_id = Column(String(3))
+    node_id = Column(String(3))
+
+class StationLink(Base):
+    __tablename__ = 'station_link'
+    start_station = Column(String(3), index=True, primary_key=True)
+    end_station = Column(String(3), index=True, primary_key=True)
+    distance = Column(Float)
+
+class Route(Base):
+    __tablename__ = 'route'
+    route_id = Column(Integer, primary_key=True)
+    route_index = Column(Integer, primary_key=True)
+    start_node = Column(String(3))
+    end_node = Column(String(3))
+    map_code = Column(String(2))
+
+class RouteLink(Base):
+    __tablename__ = 'route_link'
+    start_node = Column(String(3), index=True, primary_key=True)
+    end_node = Column(String(3), index=True, primary_key=True)
+    map_code = Column(String(2), primary_key=True)
 
 def open_dtd_database() -> Session:
     is_new_database = not os.path.exists(config.DATABASE_FILE)
@@ -127,7 +176,7 @@ def open_dtd_database() -> Session:
     Base.metadata.create_all(engine)
     db = sessionmaker(bind = engine)()
     if is_new_database:
-        db.execute('PRAGMA journal_mode=WAL')
+        db.execute('PRAGMA journal_mode = WAL')
         db.execute('PRAGMA synchronous = NORMAL')
         db.execute('PRAGMA cache_size = 100000')
 
@@ -203,12 +252,25 @@ def parse_date_ddmmyyyy(date_str: str) -> datetime.date:
     year = int(date_str[4:8])
     return datetime.date(year, month, day)
 
+def time_to_sql(time: datetime.time) -> int:
+    return time.hour*100 + time.minute
+
+def time_from_sql(time: int) -> datetime.time:
+    return datetime.time(time // 100, time % 100)
+
+def date_to_sql(date: datetime.date) -> int:
+    return date.year*10000 + date.month*100 + date.day
+
+def date_from_sql(date: int) -> datetime.date:
+    return datetime.date(date // 10000, (date // 100) % 100, date % 100)
+
 @dataclass
 class State:
     current_train: dict | None = None
     train_route_index: int = 0
     has_terminated: bool = False
     has_extra_details_record: bool = False
+    last_route_id: int = 0
 
     expired_flow_ids: set[int] = field(default_factory=set)
     duplicate_trains: set[str] = field(default_factory=set)
@@ -324,12 +386,19 @@ def record_for_mca_entry(entry: str, state: State) -> list[Record]:
         if train_uid in state.duplicate_trains:
             return []
 
+        days_run = entry[21:28]
         state.duplicate_trains.add(train_uid)
         state.current_train = dict(
             train_uid = train_uid,
-            date_runs_from = parse_date_yymmdd(entry[9:15]),
-            date_runs_to = parse_date_yymmdd(entry[15:21]),
-            days_run = entry[21:28],
+            date_runs_from = date_to_sql(parse_date_yymmdd(entry[9:15])),
+            date_runs_to = date_to_sql(parse_date_yymmdd(entry[15:21])),
+            monday = days_run[0] == '1',
+            tuesday = days_run[1] == '1',
+            wednesday = days_run[2] == '1',
+            thursday = days_run[3] == '1',
+            friday = days_run[4] == '1',
+            saturday = days_run[5] == '1',
+            sunday = days_run[6] == '1',
             bank_holiday_running = (entry[28] == 'Y'))
         return []
 
@@ -352,7 +421,7 @@ def record_for_mca_entry(entry: str, state: State) -> list[Record]:
             train_route_index = state.train_route_index - 1,
             location_type = TimetableLocationType.Origin,
             location = entry[2:10].strip(),
-            scheduled_departure_time = parse_time(entry[10:15]),
+            scheduled_departure_time = time_to_sql(parse_time(entry[10:15])),
             public_departure = parse_time(entry[15:19]),
             platform = entry[19:22].strip(),
             line = entry[22:25].strip(),
@@ -369,7 +438,7 @@ def record_for_mca_entry(entry: str, state: State) -> list[Record]:
         scheduled_pass = entry[20:25]
         if len(scheduled_pass.strip()) != 0:
             return []
-        
+
         assert not state.has_terminated
         state.train_route_index += 1
         return [(TimetableLocation, dict(
@@ -377,9 +446,8 @@ def record_for_mca_entry(entry: str, state: State) -> list[Record]:
             train_route_index = state.train_route_index - 1,
             location_type = TimetableLocationType.Intermediate,
             location = entry[2:10].strip(),
-            scheduled_arrival_time = parse_time(entry[10:15]),
-            scheduled_departure_time = parse_time(entry[15:20]),
-            scheduled_pass = parse_time(scheduled_pass),
+            scheduled_arrival_time = time_to_sql(parse_time(entry[10:15])),
+            scheduled_departure_time = time_to_sql(parse_time(entry[15:20])),
             public_arrival = parse_time(entry[25:29]),
             public_departure = parse_time(entry[29:33]),
             platform = entry[33:36].strip(),
@@ -404,7 +472,7 @@ def record_for_mca_entry(entry: str, state: State) -> list[Record]:
                 train_route_index = state.train_route_index,
                 location_type = TimetableLocationType.Terminating,
                 location = entry[2:10].strip(),
-                scheduled_arrival_time = parse_time(entry[10:15]),
+                scheduled_arrival_time = time_to_sql(parse_time(entry[10:15])),
                 public_arrival = parse_time(entry[15:19]),
                 platform = entry[19:22].strip(),
                 path = entry[22:25].strip(),
@@ -412,30 +480,82 @@ def record_for_mca_entry(entry: str, state: State) -> list[Record]:
         ]
 
     if entry_type == 'TI':
-        tiploc_code = entry[2:9].strip()
-        crs_code = entry[53:56]
-        if len(tiploc_code) == 0 or len(crs_code.strip()) == 0:
-            return []
-
         return [(TIPLOC, dict(
-            tiploc_code = tiploc_code,
-            crs_code = crs_code,
+            tiploc_code = entry[2:9].strip(),
+            crs_code = entry[53:56],
             description = entry[56:72].strip()))]
 
     return []
 
-def entry_parser_for_file(file: str) -> Callable[[str, State], list[Record]]:
-    if file.endswith('LOC'):
-        return record_for_loc_entry
-    if file.endswith('FFL'):
-        return record_for_ffl_entry
-    if file.endswith('TTY'):
-        return record_for_tty_entry
-    if file.endswith('MCA'):
-        return record_for_mca_entry
-    raise Exception(f"Unkown file '{ file }'")
+def record_for_rgd_entry(entry: str, _: State) -> list[Record]:
+    if len(entry) == 0 or entry[0] == '/':
+        return []
 
-def records_in_dtd_file(chunk_queue: Queue[RecordSet], path: str, file: str, 
+    start_station, end_station, distance = entry.split(',')
+    return [(StationLink, dict(
+        start_station = start_station,
+        end_station = end_station,
+        distance = distance))]
+
+def record_for_rgl_entry(entry: str, _: State) -> list[Record]:
+    if len(entry) == 0 or entry[0] == '/':
+        return []
+    
+    start_node, end_node, map_code = entry.split(',')
+    return [(RouteLink, dict(
+        start_node = start_node,
+        end_node = end_node,
+        map_code = map_code))]
+
+def record_for_rgs_entry(entry: str, _: State) -> list[Record]:
+    if len(entry) == 0 or entry[0] == '/':
+        return []
+    
+    fields = entry.split(',')
+    location_crs = fields[0]
+    station_group_id = fields[-1]
+    return [(Station, dict(
+        location_crs = location_crs,
+        station_group_id = station_group_id,
+        node_id = station_group_id if station_group_id != '' else location_crs))]
+
+def record_for_rgr_entry(entry: str, state: State) -> list[Record]:
+    if len(entry) == 0 or entry[0] == '/':
+        return []
+    
+    route_id = state.last_route_id
+    state.last_route_id += 1
+
+    start_node, end_node, *map_codes = entry.split(',')
+    return [(
+        Route, dict(
+            route_id = route_id,
+            route_index = i,
+            start_node = start_node,
+            end_node = end_node,
+            map_code = map_code))
+        for i, map_code in enumerate(map_codes)]
+
+def entry_parser_for_file(file: str) -> Callable[[str, State], list[Record]] | None:
+    if len(file) < 3:
+        return None
+
+    parser_map = {
+        'LOC': record_for_loc_entry,
+        'FFL': record_for_ffl_entry,
+        'FSC': record_for_fsc_entry,
+        'TTY': record_for_tty_entry,
+        'MCA': record_for_mca_entry,
+        'RGD': record_for_rgd_entry,
+        'RGL': record_for_rgl_entry,
+        'RGS': record_for_rgs_entry,
+        'RGR': record_for_rgr_entry,
+    }
+    return parser_map.get(file[-3:])
+
+def records_in_dtd_file(chunk_queue: Queue[RecordSet],
+                        entry_parser: Callable[[str, State], list[Record]],
+                        path: str, file: str, 
                         progress: Progress):
     record_chunk: RecordSet = {}
     record_chunk_count = 0
@@ -444,7 +564,6 @@ def records_in_dtd_file(chunk_queue: Queue[RecordSet], path: str, file: str,
     total_size_bytes = os.path.getsize(path + '/' + file)
     bytes_processed = 0
 
-    entry_parser = entry_parser_for_file(file)
     with open(path + '/' + file, 'r') as f:
         state = State()
         line_no = 0
@@ -456,7 +575,7 @@ def records_in_dtd_file(chunk_queue: Queue[RecordSet], path: str, file: str,
                 progress.report(file, bytes_processed, total_size_bytes)
                 last_progress_report = time.time()
 
-            for table, entry in entry_parser(entry_line, state):
+            for table, entry in entry_parser(entry_line.strip(), state):
                 record_chunk.setdefault(table, []).append(entry)
                 record_chunk_count += 1
 
@@ -474,9 +593,12 @@ def records_in_dtd_file_set(executor: Executor, chunk_queue: Queue[RecordSet | N
                             path: str, progress: Progress):
     tasks = []
     for file in os.listdir(path):
-        if not file[-3:] in ['LOC', 'FFL', 'TTY', 'MCA']:
+        entry_parser = entry_parser_for_file(file)
+        if entry_parser is None:
             continue
-        tasks.append(executor.submit(records_in_dtd_file, chunk_queue, path, file, progress))
+
+        tasks.append(executor.submit(records_in_dtd_file,
+            chunk_queue, entry_parser, path, file, progress))
 
     return tasks
 
@@ -541,20 +663,35 @@ def batch_and_flush_chunks(db: Session, chunk_queue: Queue[RecordSet | None],
             chunk_queue.qsize(), progress)
     report_flushing_progress(progress, 0, 0, 0)
 
+def generate_precomputed_tables(db: Session):
+    from_station = aliased(TimetableLocation)
+    to_station = aliased(TimetableLocation)
+    select = db.query(from_station.location, to_station.location)\
+        .select_from(from_station, to_station)\
+        .distinct()\
+        .filter(to_station.train_uid == from_station.train_uid)\
+        .filter(to_station.train_route_index == from_station.train_route_index + 1)
+
+    statement = TimetableLink.__table__\
+        .insert()\
+        .from_select(['from_location', 'to_location'], select.statement)
+    db.execute(statement)
+    db.commit()
+
 def create_new_table(db: Session, executor: Executor):
     token = '' if config.DISABLE_DOWNLOAD else generate_dtd_token()
     progress = Progress()
 
     download_tasks = []
-    for category in ['2.0/fares', '3.0/timetable']:
+    for category in ['2.0/fares', '3.0/timetable', '2.0/routeing']:
         download_tasks.append(executor.submit(download_dtd_category, token, category, progress))
 
     # Clear alongside downloading
     clear_dtd_database(db)
 
     chunk_queue: Queue[RecordSet | None] = Queue(maxsize = config.MAX_QUEUE_SIZE)
-    write_tasks = []
     paths = []
+    write_tasks = []
     for task in as_completed(download_tasks):
         path = task.result()
         paths.append(path) 
@@ -568,8 +705,9 @@ def create_new_table(db: Session, executor: Executor):
             if not e:
                 continue
 
-            print(Exception, e, file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+            print(result, file=sys.stderr)
+            print(type(e), e, file=sys.stderr)
+            traceback.print_exception(type(e), value=e, file=sys.stderr)
 
             chunk_queue.put(None)
             raise e
@@ -578,6 +716,7 @@ def create_new_table(db: Session, executor: Executor):
 
     # NOTE: We can only run SQL on the main thread
     batch_and_flush_chunks(db, chunk_queue, progress)
+    generate_precomputed_tables(db)
 
     # Propagate any exceptions
     wait([wait_task], return_when=FIRST_EXCEPTION)

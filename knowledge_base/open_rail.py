@@ -1,207 +1,313 @@
 from __future__ import annotations
 
 import datetime
+import copy
+import math
 from dataclasses import dataclass
-from itertools import accumulate, groupby
-from knowledge_base.dtd import FareRecord, FlowRecord, LocationRecord, TicketType
-from knowledge_base.dtd import TIPLOC, TimetableLocation, TrainTimetable
+from itertools import groupby
+from typing import Any, Callable, Iterable, Protocol, TypeVar
+from knowledge_base.dtd import FareRecord, FlowRecord, LocationRecord, StationCluster, TicketType
+from knowledge_base.dtd import TIPLOC, date_to_sql
+from knowledge_base.dtd import TimetableLocation, TrainTimetable, TimetableLink
+from sqlalchemy.sql import func
 from sqlalchemy.sql.elements import literal
 from sqlalchemy.orm.util import aliased
 from sqlalchemy.orm.session import Session
 
 @dataclass
-class Route:
+class TrainRouteSegment:
+    path: TrainPath
+    stop_location: str
+
+@dataclass
+class JourneySegment:
     start: TimetableLocation
-    change_over: list[tuple[TimetableLocation, TimetableLocation]]
     end: TimetableLocation
 
-    def __init__(self, *stations):
-        assert len(stations) >= 2
-        self.start = stations[0]
-        self.end = stations[-1]
+LocationRoute = list[str]
+TrainStops = list[TimetableLocation]
+TrainPath = tuple[str, ...]
 
-        changes = stations[1:-1]
-        assert len(changes) % 2 == 0
-        self.change_over = list(zip(changes[::2], changes[1::2]))
+TrainRoute = list[TrainRouteSegment]
+Journey = list[JourneySegment]
 
-    def join(self, other: Route | None):
-        if other is None:
-            return None
+class Path:
+    _stations: list[str]
+    _sub_paths: list[Path]
 
-        new_route = Route(self.start, *[y for x in self.change_over for y in x], self.end)
-        new_route.change_over.append((self.end, other.start))
-        new_route.change_over += other.change_over
-        new_route.end = other.end
-        return new_route
+    _locations: set[str]
+    _sub_path_locations: list[set[str]]
+
+    def __init__(self, other: Path = None):
+        self._stations = copy.copy(other._stations) if other else []
+        self._sub_paths = copy.copy(other._sub_paths) if other else []
+
+        self._locations = copy.copy(other._locations) if other else set()
+        self._sub_path_locations = copy.copy(other._sub_path_locations) if other else []
+
+    def extend(self, from_location: str) -> Path:
+        new_path = Path(self)
+        new_path._stations.insert(0, from_location)
+        new_path._locations.add(from_location)
+        return new_path
     
-    def __repr__(self) -> str:
-        return (
-            f"{ self.start.public_departure } -> " +
-            ''.join([
-                f"{ stop.public_arrival } { stop.location :^10} { join.public_departure } -> "
-                for stop, join in self.change_over]) +
-            f"{ self.end.public_arrival }")
+    def merge(self, other: Path) -> Path:
+        # Flatten any unneeded sub paths
+        new_path = Path()
+        for sub_path in [self, other]:
+            new_path._sub_path_locations.append(sub_path._locations)
+            new_path._sub_path_locations += sub_path._sub_path_locations
+            if len(sub_path._stations) == 0:
+                new_path._sub_paths += sub_path._sub_paths
+            else:
+                new_path._sub_paths.append(sub_path)
 
-def possible_two_way_change_over_locations(db: Session, from_location: str, to_location: str):
-    start = aliased(TimetableLocation)
-    stop_a = aliased(TimetableLocation)
-    a_to_b = literal([x[0] for x in db.query(stop_a.location)\
-        .select_from(start, stop_a)\
-        .distinct()\
-        .filter(start.location == from_location)\
-        .filter(stop_a.train_uid == start.train_uid)\
-        .filter(stop_a.train_route_index > start.train_route_index)\
-        .all()])
+        return new_path
 
-    join_b = aliased(TimetableLocation)
-    end = aliased(TimetableLocation)
-    b_to_c = db.query(join_b.location)\
-        .select_from(join_b, end)\
-        .distinct()\
-        .filter(join_b.location.in_(a_to_b))\
-        .filter(end.location == to_location)\
-        .filter(join_b.train_uid == end.train_uid)\
-        .filter(join_b.train_route_index < end.train_route_index)
-    return [x[0] for x in b_to_c.all()]
+    def has_been_to(self, location: str) -> bool:
+        if location in self._locations:
+            return True
 
-def possible_three_way_change_over_locations(db: Session, from_location: str, to_location: str):
-    start = aliased(TimetableLocation)
-    stop_a = aliased(TimetableLocation)
-    a_to_b = literal([x[0] for x in db.query(stop_a.location)\
-        .select_from(start, stop_a)\
-        .distinct()\
-        .filter(stop_a.train_uid == start.train_uid)\
-        .filter(start.location == from_location)\
-        .filter(stop_a.train_route_index > start.train_route_index)\
-        .all()])
+        return any([location in location_set 
+            for location_set in self._sub_path_locations])
 
-    join_c = aliased(TimetableLocation)
-    end = aliased(TimetableLocation)
-    c_to_d = literal([x[0] for x in db.query(join_c.location)\
-        .select_from(join_c, end)\
-        .distinct()\
-        .filter(end.train_uid == join_c.train_uid)\
-        .filter(end.location == to_location)\
-        .filter(end.train_route_index > join_c.train_route_index)\
-        .all()])
+    def possible_paths_count(self) -> int:
+        return 1 + sum([sub_path.possible_paths_count() 
+            for sub_path in self._sub_paths])
 
-    join_b = aliased(TimetableLocation)
-    stop_b = aliased(TimetableLocation)
-    b_to_c = db.query(join_b.location, stop_b.location)\
-        .select_from(join_b, stop_b)\
-        .distinct()\
-        .filter(join_b.location.in_(a_to_b))\
-        .filter(stop_b.location.in_(c_to_d))\
-        .filter(join_b.train_uid == stop_b.train_uid)\
-        .filter(join_b.train_route_index < stop_b.train_route_index)
-    return b_to_c.all()
+    def all_locations(self) -> set[str]:
+        return self._locations.union(*self._sub_path_locations)
 
-def find_single_train_routes(db: Session, from_location: str | list[str], to_location: str | list[str], 
-                             date: datetime.date) -> list[Route]:
-    start_station = aliased(TimetableLocation)
-    target_station = aliased(TimetableLocation)
-    current_day = datetime.datetime.now().weekday()
-    day_pattern = ''.join(['1' if day == current_day else '_' for day in range(7)])
+    def routes(self) -> list[LocationRoute]:
+        if len(self._sub_paths) == 0:
+            return [self._stations]
 
-    result = db.query(start_station, target_station)\
-        .select_from(start_station)\
-        .join(TrainTimetable, TrainTimetable.train_uid == start_station.train_uid)\
-        .join(target_station, target_station.train_uid == start_station.train_uid)\
-        .filter(date >= TrainTimetable.date_runs_from)\
-        .filter(date <= TrainTimetable.date_runs_to)\
-        .filter(TrainTimetable.days_run.like(day_pattern))\
-        .filter(target_station.train_route_index > start_station.train_route_index)\
+        return [self._stations + sub_route
+            for sub_path in self._sub_paths
+            for sub_route in sub_path.routes()]
 
-    if isinstance(from_location, str):
-        result = result.filter(start_station.location == literal(from_location))
-    else:
-        result = result.filter(start_station.location.in_(literal(from_location)))
+    def debug_print(self, indent: int = 0):
+        print(f"{ ' ' * indent }{ ' '.join(self._stations) }")
+        for sub_path in self._sub_paths:
+            sub_path.debug_print(indent + 1)
 
-    if isinstance(to_location, str):
-        result = result.filter(target_station.location == literal(to_location))
-    else:
-        result = result.filter(target_station.location.in_(literal(to_location)))
-    return [Route(*x) for x in result]
+class _SupportsLessThan(Protocol):
+    def __lt__(self, __other: Any) -> bool: ...
 
-def group(it, key):
+_SupportsLessThanT = TypeVar("_SupportsLessThanT", bound=_SupportsLessThan)
+_T = TypeVar('_T')
+def group(it: Iterable[_T], key: Callable[[_T], _SupportsLessThanT]) -> dict[_SupportsLessThanT, list[_T]]:
     return { k: list(g) for k, g in groupby(sorted(it, key=key), key=key) }
 
-def link_train_routes(a_to_b_routes: list[Route], b_to_c_routes: list[Route]) -> list[Route]:
-    # Match each starting route to an ending one
-    routes_from_location: dict[str, list[Route]] = group(b_to_c_routes, lambda b_to_c: b_to_c.start.location)
-    return [route
-        for route in [
-            a_to_b.join(min(
-                [b_to_c
-                    for b_to_c in routes_from_location[a_to_b.end.location]
-                    if b_to_c.start.scheduled_departure_time > a_to_b.end.scheduled_arrival_time],
-                default = None,
-                key = lambda x: x.start.scheduled_departure_time))
-            for a_to_b in a_to_b_routes
-            if a_to_b.end.location in routes_from_location]
-        if not route is None]
+def links_from_location(db: Session, from_loc: Iterable[str]):
+    links = db.query(TimetableLink.from_location, TimetableLink.to_location)\
+        .select_from(TimetableLink)\
+        .filter(TimetableLink.from_location.in_(from_loc))\
+        .all()
+    return links
 
-def find_two_train_routes(db: Session, from_location: str, to_location: str, date: datetime.date):
-    possible_b_locations = possible_two_way_change_over_locations(
-        db, from_location, to_location)
+def search_paths(db: Session, n: int,
+                 from_loc: str, to_loc: str) -> list[Path]:
+    found_paths = []
+    found_possible_routes_count = 0
+    paths = { from_loc: Path() }
+    depth = 0
+    while found_possible_routes_count < n:
+        next_paths = {}
+        for from_location, to_location in links_from_location(db, paths.keys()):
+            path = paths[from_location]
+            if path.has_been_to(to_location):
+                continue
 
-    a_to_b = find_single_train_routes(db, from_location, possible_b_locations, date)
-    b_to_c = find_single_train_routes(db, possible_b_locations, to_location, date)
-    a_to_d = link_train_routes(a_to_b, b_to_c)
-    return a_to_d
+            new_path = path.extend(from_location)
+            if to_location in next_paths:
+                new_path = new_path.merge(next_paths[to_location])
+            next_paths[to_location] = new_path
 
-def find_three_train_routes(db: Session, from_location: str, to_location: str, date: datetime.date):
-    possible_locations = possible_three_way_change_over_locations(
-        db, from_location, to_location)
+        paths = next_paths
+        if to_loc in paths:
+            path = paths[to_loc].extend(to_loc)
+            found_possible_routes_count += path.possible_paths_count()
+            found_paths.append(path)
+            del paths[to_loc]
+        
+        depth += 1
+        if depth >= 400:
+            break
 
-    possible_b_locations = list(set([b for b, _ in possible_locations]))
-    possible_c_locations = list(set([c for _, c in possible_locations]))
+    return found_paths
 
-    a_to_b = find_single_train_routes(db, from_location, possible_b_locations, date)
-    b_to_c = find_single_train_routes(db, possible_c_locations, possible_b_locations, date)
-    c_to_d = find_single_train_routes(db, possible_b_locations, to_location, date)
-    a_to_d = link_train_routes(link_train_routes(a_to_b, b_to_c), c_to_d)
-    return a_to_d
+def train_stops_in_route(db: Session, route: LocationRoute,
+                         date: datetime.date) -> list[TimetableLocation]:
+    possible_end_locations = db.query(TimetableLocation)\
+        .select_from(TimetableLocation)\
+        .join(TrainTimetable, TrainTimetable.train_uid == TimetableLocation.train_uid)\
+        .filter(TimetableLocation.location.in_(literal(route)))\
+        .filter(date_to_sql(date) >= TrainTimetable.date_runs_from)\
+        .filter(date_to_sql(date) <= TrainTimetable.date_runs_to)\
+        .filter(TrainTimetable.day_to_column(date.weekday()))
+    return list(possible_end_locations.all())
 
-def find_routes(db: Session, from_location: str, to_location: str, 
-                date: datetime.date) -> list[Route]:
-    from_tiploc = db.query(TIPLOC).filter(TIPLOC.crs_code == from_location).first().tiploc_code
-    to_tiploc = db.query(TIPLOC).filter(TIPLOC.crs_code == to_location).first().tiploc_code
+def train_stops_from_paths(db: Session, date: datetime.date,
+                           paths: Iterable[Path]) -> list[TimetableLocation]:
+    all_locations = set().union(
+        *[path.all_locations() for path in paths])
+    return train_stops_in_route(db, list(all_locations), date)
+
+def sort_trains_by_uid(train_stops: TrainStops,
+                       route: LocationRoute) -> dict[str, TrainStops]:
+    stops_by_train_uid: dict[str, TrainStops] = {}
+    index_lookup = { location: i for i, location in enumerate(route) }
+
+    for new_stop in train_stops:
+        if not new_stop.train_uid in stops_by_train_uid:
+            stops_by_train_uid[new_stop.train_uid] = [new_stop]
+            continue
+        
+        train = stops_by_train_uid[new_stop.train_uid]
+        location_route_index = index_lookup[new_stop.location]
+
+        if (new_stop.train_route_index < train[-1].train_route_index
+            and location_route_index > index_lookup[train[-1].location]):
+            train.append(new_stop)
+            continue
+
+        last_stop_route_index = math.inf
+        for i, next_stop in enumerate(train):
+            if (new_stop.train_route_index > next_stop.train_route_index
+                and new_stop.train_route_index < last_stop_route_index
+                and location_route_index < index_lookup[next_stop.location]):
+                train.insert(i, new_stop)
+                break
+            last_stop_route_index = next_stop.train_route_index
+    return {
+        train_uid: stops
+        for train_uid, stops in stops_by_train_uid.items()
+        if len(stops) > 1 }
+
+def search_train_route(start: str,
+                       train_paths: Iterable[TrainPath],
+                       route: LocationRoute,
+                       train_route: TrainRoute = [],
+                       ) -> TrainRoute | None:
+    if len(train_route) > 3:
+        return None
+
+    trains = [train for train in train_paths if start in train]
+    for train in trains:
+        end_location = route[0]
+        if end_location in train:
+            return train_route + [TrainRouteSegment(train, end_location)]
+
+        for stop in train:
+            if route.index(stop) >= route.index(start):
+                continue
+
+            result = search_train_route(stop, train_paths, route,
+                train_route + [TrainRouteSegment(train, stop)])
+            if not result is None:
+                return result
+    return None
+
+def find_journeys(trains_by_paths: dict[TrainPath, list[TrainStops]],
+                  train_route: TrainRoute) -> list[Journey]:
+    start_trains = trains_by_paths[train_route[0].path]
+    journeys: list[Journey] = []
+    for start_train in start_trains:
+        first_start = start_train[-1]
+        first_stop = next(filter(lambda x: x.location == train_route[0].stop_location, start_train))
+        journey: Journey = [JourneySegment(first_start, first_stop)]
+        for segment in train_route[1:]:
+            trains = [(stop, train)
+                for train in trains_by_paths[segment.path]
+                for stop in train
+                    if (stop.location == journey[-1].end.location and
+                        stop.scheduled_departure_time > journey[-1].end.scheduled_arrival_time)]
+            if len(trains) == 0:
+                break
+
+            start, train = min(trains, key=lambda x: x[0].scheduled_departure_time)
+            stop = next(filter(lambda x: x.location == segment.stop_location, train))
+            journey.append(JourneySegment(start, stop))
+        else:
+            journeys.append(journey)
+    return journeys
+
+def find_journeys_for_route(route: LocationRoute,
+                          all_train_stops: list[TimetableLocation]) -> list[Journey]:
+    train_stops = [stop for stop in all_train_stops if stop.location in route]
+    stops_by_train_uid = sort_trains_by_uid(train_stops, route)
+    trains_by_paths = group(
+        stops_by_train_uid.values(),
+        lambda x: tuple([str(stop.location) for stop in x]))
+    train_paths = trains_by_paths.keys()
+
+    start_location = route[-1]
+    train_route = search_train_route(start_location, train_paths, route)
+    if train_route is None:
+        return []
     
-    routes = (
-        find_single_train_routes(db, from_tiploc, to_tiploc, date) +
-        find_two_train_routes(db, from_tiploc, to_tiploc, date))
+    return find_journeys(trains_by_paths, train_route)
 
-    # Only look for three train routes if there's not enough, as this is expensive
-    if len(routes) < 10:
-        routes += find_three_train_routes(db, from_tiploc, to_tiploc, date)
-    
-    # Pick the fastest route for each time
-    routes = sorted(
-        [min(route, key=lambda x: x.end.scheduled_arrival_time)
-            for route in group(routes, lambda x: x.start.scheduled_departure_time).values()],
-        key=lambda route: route.start.scheduled_departure_time)
+def find_best_journeys_for_paths(db: Session, date: datetime.date,
+                                 paths: Iterable[Path]) -> list[Journey]:
+    all_train_stops = train_stops_from_paths(db, date, paths)
+    all_journeys = [
+        journey
+        for path in paths
+        for route in path.routes()
+        for journey in find_journeys_for_route(route, all_train_stops)]
 
-    # Don't show any routes that start earlier and arrive later
-    return [route
-        for smallest_time, route in zip(
-            accumulate(
-                [route.end.scheduled_arrival_time for route in routes], max,
-                initial=datetime.time(0, 0)),
-            routes)
-        if route.end.scheduled_arrival_time > smallest_time]
+    return [
+        min(g, key = lambda x: x[0].start.scheduled_departure_time)
+        for g in group(all_journeys, lambda x: x[-1].end.scheduled_arrival_time).values()]
+
+def crs_route_to_tiploc_route(db: Session, crs_route: LocationRoute) -> LocationRoute:
+    crs_to_tiploc_map = {
+        crs: tiploc
+        for crs, tiploc in db\
+            .query(TIPLOC.crs_code, TIPLOC.tiploc_code)\
+            .filter(TIPLOC.crs_code.in_(crs_route))\
+            .all() }
+    return [crs_to_tiploc_map[crs] for crs in crs_route]
+
+def tiploc_route_to_crs_route(db: Session, tiploc_route: LocationRoute) -> LocationRoute:
+    tiploc_to_crs_map = {
+        tiploc: crs
+        for tiploc, crs in db\
+            .query(TIPLOC.tiploc_code, TIPLOC.crs_code)\
+            .filter(TIPLOC.tiploc_code.in_(tiploc_route))\
+            .all() }
+    return [tiploc_to_crs_map[tiploc] for tiploc in tiploc_route]
+
+def find_best_journeys_from_crs(db: Session, from_crs: str, to_crs: str,
+                                date: datetime.date):
+    from_loc, to_loc = crs_route_to_tiploc_route(db, [from_crs, to_crs])
+    found_paths = search_paths(db, 4, from_loc, to_loc)
+    return find_best_journeys_for_paths(db, date, found_paths)
+
+def ncl_for_location_crs(db: Session, *crs: str) -> list[list[str]]:
+    result = (
+        db.query(
+            LocationRecord.ncl_code,
+            func.ifnull(StationCluster.cluster_id, LocationRecord.ncl_code))\
+        .select_from(LocationRecord)\
+        .outerjoin(StationCluster, StationCluster.location_nlc == LocationRecord.ncl_code)\
+        .filter(LocationRecord.crs_code.in_(literal(crs)))\
+        .all())
+
+    return [
+        [cluster_id for _, cluster_id in clusters]
+        for clusters in group(result, lambda x: x[0]).values()]
 
 def ticket_prices(db: Session, from_location: str, to_location: str) -> list[tuple[int, TicketType]]:
-    origin = aliased(LocationRecord)
-    destination = aliased(LocationRecord)
+    from_clusters, to_clusters = ncl_for_location_crs(db, from_location, to_location)
     result = db.query(FareRecord, TicketType)\
         .select_from(FareRecord)\
         .join(FlowRecord, FlowRecord.flow_id == FareRecord.flow_id)\
-        .join(origin, origin.ncl_code == FlowRecord.origin_code)\
-        .join(destination, destination.ncl_code == FlowRecord.destination_code)\
         .join(TicketType, TicketType.ticket_code == FareRecord.ticket_code)\
-        .filter(origin.crs_code == from_location)\
-        .filter(destination.crs_code == to_location)\
+        .filter(FlowRecord.origin_code.in_(literal(from_clusters)))\
+        .filter(FlowRecord.destination_code.in_(literal(to_clusters)))\
         .all()
 
     return [(fare.fare, ticket) for fare, ticket in result]
