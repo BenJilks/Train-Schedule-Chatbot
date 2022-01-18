@@ -1,23 +1,17 @@
 from __future__ import annotations
-
 import datetime
 import copy
 import math
 from dataclasses import dataclass
 from itertools import groupby
-from typing import Any, Callable, Iterable, Protocol, TypeVar
+from typing import Any, Callable, Iterable, Iterator, Protocol, TypeVar
+from knowledge_base import TrainPath, TrainRoute, TrainRouteSegment
 from knowledge_base.dtd import FareRecord, FlowRecord, LocationRecord, StationCluster, TicketType
 from knowledge_base.dtd import TIPLOC, date_to_sql
 from knowledge_base.dtd import TimetableLocation, TrainTimetable, TimetableLink
 from sqlalchemy.sql import func
 from sqlalchemy.sql.elements import literal
-from sqlalchemy.orm.util import aliased
 from sqlalchemy.orm.session import Session
-
-@dataclass
-class TrainRouteSegment:
-    path: TrainPath
-    stop_location: str
 
 @dataclass
 class JourneySegment:
@@ -26,9 +20,6 @@ class JourneySegment:
 
 LocationRoute = list[str]
 TrainStops = list[TimetableLocation]
-TrainPath = tuple[str, ...]
-
-TrainRoute = list[TrainRouteSegment]
 Journey = list[JourneySegment]
 
 class Path:
@@ -197,14 +188,14 @@ def search_train_route(start: str,
     for train in trains:
         end_location = route[0]
         if end_location in train:
-            return train_route + [TrainRouteSegment(train, end_location)]
+            return train_route + [TrainRouteSegment(train, start, end_location)]
 
         for stop in train:
             if route.index(stop) >= route.index(start):
                 continue
 
             result = search_train_route(stop, train_paths, route,
-                train_route + [TrainRouteSegment(train, stop)])
+                train_route + [TrainRouteSegment(train, start, stop)])
             if not result is None:
                 return result
     return None
@@ -234,7 +225,8 @@ def find_journeys(trains_by_paths: dict[TrainPath, list[TrainStops]],
     return journeys
 
 def find_journeys_for_route(route: LocationRoute,
-                          all_train_stops: list[TimetableLocation]) -> list[Journey]:
+                            all_train_stops: list[TimetableLocation]
+                            ) -> tuple[TrainRoute, list[Journey]] | None:
     train_stops = [stop for stop in all_train_stops if stop.location in route]
     stops_by_train_uid = sort_trains_by_uid(train_stops, route)
     trains_by_paths = group(
@@ -245,22 +237,17 @@ def find_journeys_for_route(route: LocationRoute,
     start_location = route[-1]
     train_route = search_train_route(start_location, train_paths, route)
     if train_route is None:
-        return []
+        return None
     
-    return find_journeys(trains_by_paths, train_route)
+    return train_route, find_journeys(trains_by_paths, train_route)
 
-def find_best_journeys_for_paths(db: Session, date: datetime.date,
-                                 paths: Iterable[Path]) -> list[Journey]:
+def find_journeys_for_paths(db: Session, date: datetime.date,
+                            paths: Iterable[Path]) -> Iterator[tuple[TrainRoute, list[Journey]]]:
     all_train_stops = train_stops_from_paths(db, date, paths)
-    all_journeys = [
-        journey
-        for path in paths
-        for route in path.routes()
-        for journey in find_journeys_for_route(route, all_train_stops)]
-
-    return [
-        min(g, key = lambda x: x[0].start.scheduled_departure_time)
-        for g in group(all_journeys, lambda x: x[-1].end.scheduled_arrival_time).values()]
+    for route in [route for path in paths for route in path.routes()]:
+        result = find_journeys_for_route(route, all_train_stops)
+        if not result is None:
+            yield result
 
 def crs_route_to_tiploc_route(db: Session, crs_route: LocationRoute) -> LocationRoute:
     crs_to_tiploc_map = {
@@ -271,20 +258,14 @@ def crs_route_to_tiploc_route(db: Session, crs_route: LocationRoute) -> Location
             .all() }
     return [crs_to_tiploc_map[crs] for crs in crs_route]
 
-def tiploc_route_to_crs_route(db: Session, tiploc_route: LocationRoute) -> LocationRoute:
-    tiploc_to_crs_map = {
-        tiploc: crs
-        for tiploc, crs in db\
-            .query(TIPLOC.tiploc_code, TIPLOC.crs_code)\
-            .filter(TIPLOC.tiploc_code.in_(tiploc_route))\
-            .all() }
-    return [tiploc_to_crs_map[tiploc] for tiploc in tiploc_route]
-
-def find_best_journeys_from_crs(db: Session, from_crs: str, to_crs: str,
-                                date: datetime.date):
+def find_journeys_from_crs(db: Session, from_crs: str, to_crs: str,
+                           date: datetime.date) -> Iterator[Journey]:
     from_loc, to_loc = crs_route_to_tiploc_route(db, [from_crs, to_crs])
     found_paths = search_paths(db, 4, from_loc, to_loc)
-    return find_best_journeys_for_paths(db, date, found_paths)
+
+    train_routes = find_journeys_for_paths(db, date, found_paths)
+    for _, journeys in train_routes:
+        yield from journeys
 
 def ncl_for_location_crs(db: Session, *crs: str) -> list[list[str]]:
     result = (

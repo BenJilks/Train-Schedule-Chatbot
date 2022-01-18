@@ -4,6 +4,10 @@ DATABASE_FILE = 'dtd.db'
 DTD_EXPIRY = 60 * 60 * 24 * 365 # 1 year
 CREDENTIALS = ('benjyjilks@gmail.com', '2n3gfJUdxGizAHF%')
 
+HSP_API_URL = 'https://hsp-prod.rockshore.net/api/v1'
+HSP_SERVICE_METRICS_API_URL = HSP_API_URL + '/serviceMetrics'
+HSP_SERVICE_DETAILS_API_URL = HSP_API_URL + '/serviceDetails'
+
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024 # 1MB
 MAX_NUMBER_OF_QUEUED_BATCH_STATEMENTS = 5
 RECORD_CHUNK_SIZE = 1_00_000
@@ -11,8 +15,11 @@ SQL_BATCH_SIZE = 10_00_000
 MAX_QUEUE_SIZE = int(SQL_BATCH_SIZE / RECORD_CHUNK_SIZE) * MAX_NUMBER_OF_QUEUED_BATCH_STATEMENTS
 
 DISABLE_DOWNLOAD = False
-LOCAL_DTD_STORAGE = { 
-    '2.0/fares': './dtd_fares',
-    '3.0/timetable': './dtd_timetable',
+BACKUP_DOWNLOADED_TO_LOCAL = False
+LOCAL_FEED_STORAGE_BASE = './dtd_storage'
+LOCAL_FEED_STORAGE = { 
+    '2.0/fares': (LOCAL_FEED_STORAGE_BASE, 'FARES.ZIP'),
+    '3.0/timetable': (LOCAL_FEED_STORAGE_BASE, 'TIMETABLE.ZIP'),
+    '2.0/routeing': (LOCAL_FEED_STORAGE_BASE, 'ROUTES.ZIP'),
 }
 
