@@ -525,17 +525,13 @@ class DTDFeed(Feed):
                         executor: Executor,
                         chunk_queue: Queue[RecordSet | None],
                         path: str,
-                        filename: str,
                         progress: Progress) -> Iterable[Future]:
-        zip_file_path = os.path.join(path, filename)
+        zip_file_path = os.path.join(path, self.file_name())
         with ZipFile(zip_file_path, 'r') as f:
             f.extractall(path)
         os.remove(zip_file_path)
 
         return records_in_dtd_file_set(executor, chunk_queue, path, progress)
-
-    def local_storage_path(self) -> tuple[str, str]:
-        return config.LOCAL_FEED_STORAGE[self.feed_api_url()]
 
     def expiry_length(self) -> int:
         return config.DTD_EXPIRY
@@ -543,6 +539,9 @@ class DTDFeed(Feed):
 class DTDFaresFeed(DTDFeed):
     def feed_api_url(self) -> str:
         return '2.0/fares'
+
+    def file_name(self) -> str:
+        return 'FARES.ZIP'
 
     def associated_tables(self) -> Iterable[type[Base]]:
         return [
@@ -552,6 +551,9 @@ class DTDFaresFeed(DTDFeed):
 class DTDTimetableFeed(DTDFeed):
     def feed_api_url(self) -> str:
         return '3.0/timetable'
+
+    def file_name(self) -> str:
+        return 'TIMETABLE.ZIP'
 
     def preprocess_hook(self, db: Session):
         generate_precomputed_tables(db)
@@ -564,6 +566,9 @@ class DTDTimetableFeed(DTDFeed):
 class DTDRouteingFeed(DTDFeed):
     def feed_api_url(self) -> str:
         return '2.0/routeing'
+
+    def file_name(self) -> str:
+        return 'ROUTEING.ZIP'
 
     def associated_tables(self) -> Iterable[type[Base]]:
         return [
