@@ -3,13 +3,10 @@ import datetime
 import copy
 import math
 from dataclasses import dataclass
-from itertools import groupby
-from typing import Any, Callable, Iterable, Iterator, Protocol, TypeVar
-from knowledge_base import TrainPath, TrainRoute, TrainRouteSegment
-from knowledge_base.dtd import FareRecord, FlowRecord, LocationRecord, StationCluster, TicketType
+from typing import Iterable, Iterator
+from knowledge_base import TrainPath, TrainRoute, TrainRouteSegment, group
 from knowledge_base.dtd import TIPLOC, date_to_sql
 from knowledge_base.dtd import TimetableLocation, TrainTimetable, TimetableLink
-from sqlalchemy.sql import func
 from sqlalchemy.sql.elements import literal
 from sqlalchemy.orm.session import Session
 
@@ -81,14 +78,6 @@ class Path:
         print(f"{ ' ' * indent }{ ' '.join(self._stations) }")
         for sub_path in self._sub_paths:
             sub_path.debug_print(indent + 1)
-
-class _SupportsLessThan(Protocol):
-    def __lt__(self, __other: Any) -> bool: ...
-
-_SupportsLessThanT = TypeVar("_SupportsLessThanT", bound=_SupportsLessThan)
-_T = TypeVar('_T')
-def group(it: Iterable[_T], key: Callable[[_T], _SupportsLessThanT]) -> dict[_SupportsLessThanT, list[_T]]:
-    return { k: list(g) for k, g in groupby(sorted(it, key=key), key=key) }
 
 def links_from_location(db: Session, from_loc: Iterable[str]):
     links = db.query(TimetableLink.from_location, TimetableLink.to_location)\
@@ -266,30 +255,4 @@ def find_journeys_from_crs(db: Session, from_crs: str, to_crs: str,
     train_routes = find_journeys_for_paths(db, date, found_paths)
     for _, journeys in train_routes:
         yield from journeys
-
-def ncl_for_location_crs(db: Session, *crs: str) -> list[list[str]]:
-    result = (
-        db.query(
-            LocationRecord.ncl_code,
-            func.ifnull(StationCluster.cluster_id, LocationRecord.ncl_code))\
-        .select_from(LocationRecord)\
-        .outerjoin(StationCluster, StationCluster.location_nlc == LocationRecord.ncl_code)\
-        .filter(LocationRecord.crs_code.in_(literal(crs)))\
-        .all())
-
-    return [
-        [cluster_id for _, cluster_id in clusters]
-        for clusters in group(result, lambda x: x[0]).values()]
-
-def ticket_prices(db: Session, from_location: str, to_location: str) -> list[tuple[int, TicketType]]:
-    from_clusters, to_clusters = ncl_for_location_crs(db, from_location, to_location)
-    result = db.query(FareRecord, TicketType)\
-        .select_from(FareRecord)\
-        .join(FlowRecord, FlowRecord.flow_id == FareRecord.flow_id)\
-        .join(TicketType, TicketType.ticket_code == FareRecord.ticket_code)\
-        .filter(FlowRecord.origin_code.in_(literal(from_clusters)))\
-        .filter(FlowRecord.destination_code.in_(literal(to_clusters)))\
-        .all()
-
-    return [(fare.fare, ticket) for fare, ticket in result]
 

@@ -1,6 +1,7 @@
-from knowledge_base.feeds import open_database
-from knowledge_base.open_rail import find_journeys_from_crs, ticket_prices
 import datetime
+from knowledge_base.feeds import open_database
+from reasoning_engine.routeing import find_journeys_from_crs
+from reasoning_engine.tickets import ticket_prices
 
 def main():
     db = open_database()
