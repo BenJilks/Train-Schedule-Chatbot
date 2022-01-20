@@ -13,7 +13,10 @@ from tensorflow.keras.layers import Dense, Dropout, Activation
 
 from tensorflow.keras.optimizers import SGD
 
+REQUIRED_NLTK_PACKAGES = ['punkt', 'wordnet', 'omw-1.4']
 
+for package_id in REQUIRED_NLTK_PACKAGES:
+    nltk.download(package_id)
 
 lemmatizer = WordNetLemmatizer()
 # used to to reduce words to their stems
@@ -28,8 +31,6 @@ documents = []
 #will store both the words and the intent
 classes = []
 #details the class of the particular intent, e.g 'greetings'
-
-
 
 for intent in intents['intents']:
     #iterating over our 'intents' dictionary in JSON
