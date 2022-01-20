@@ -1,0 +1,22 @@
+{"intents":[
+
+  {"tag": "greetings",
+  "patterns":["hey", "hi", "greetings", "hello", "good day"],
+  "responses": ["Hey!", "How can I help you?","Hello!","How can I be of assistance?"]
+  },
+
+  {"tag": "goodbye",
+  "patterns":["bye", "Goodbye", "see ya", "I am going now", "Thanks for the help"],
+  "responses": ["Goodbye!", "Talk later!","Glad to be of assistance!"]
+  },
+
+  {"tag": "origin",
+  "patterns":["What are you?", "What is this?", "Who created you?", "Who are you?"],
+  "responses": ["I am a bot created by Ben, Mitchel and Fergus, with the intent of finding the cheapest train ticket for you!"]
+  },
+  {"tag": "Destination",
+  "patterns":["hey", "hi", "greetings", "hello", "good day"],
+  "responses": ["Hey!", "How can I help you?","Hello!","How can I be of assistance?"]
+  }
+
+]}
