@@ -8,6 +8,9 @@ HSP_API_URL = 'https://hsp-prod.rockshore.net/api/v1'
 HSP_SERVICE_METRICS_API_URL = HSP_API_URL + '/serviceMetrics'
 HSP_SERVICE_DETAILS_API_URL = HSP_API_URL + '/serviceDetails'
 
+DARWIN_TOKEN = 'c77dcba0-aed9-426f-97b5-e52274822e42'
+DARWIN_API_URL = 'https://lite.realtime.nationalrail.co.uk/OpenLDBWS/wsdl.aspx?ver=2016-02-16'
+
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024 # 1MB
 MAX_NUMBER_OF_QUEUED_BATCH_STATEMENTS = 5
 RECORD_CHUNK_SIZE = 1_00_000

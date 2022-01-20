@@ -34,6 +34,33 @@ class ExpiryTimes(Base):
     api_url = Column(Text, primary_key=True)
     expiry_timestamp = Column(Integer)
 
+class RecordChunkGenerator:
+    _chunk_queue: Queue[RecordSet]
+    _chunk: RecordSet
+    _chunk_count: int
+
+    def __init__(self, chunk_queue: Queue[RecordSet]):
+        self._chunk_queue = chunk_queue
+        self._chunk = {}
+        self._chunk_count = 0
+
+    def put(self, record: Record):
+        table, entry = record
+        self._chunk.setdefault(table, []).append(entry)
+        self._chunk_count += 1
+
+        if self._chunk_count >= config.RECORD_CHUNK_SIZE:
+            self._chunk_queue.put(self._chunk)
+            self._chunk = {}
+            self._chunk_count = 0
+
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *_):
+        if self._chunk_count > 0:
+            self._chunk_queue.put(self._chunk)
+
 class Feed(ABC):
     _registered_feeds: set[type[Feed]] = set()
 
@@ -192,6 +219,7 @@ def flush_record_chunk(db: Session, record_chunk: RecordSet,
 
     for table, entries in record_chunk.items():
         db.bulk_insert_mappings(table, entries)
+    db.commit()
     
     report_flushing_progress(progress, written + chunk_count, 0, queue_size)
 
@@ -316,7 +344,7 @@ def update_database(db: Session):
     if len(outdated_feeds) == 0:
         return
 
-    print('Updating DTD database')
+    print('Updating feeds', *[feed.feed_api_url() for feed in outdated_feeds])
     is_updating = True
 
     with ThreadPoolExecutor() as executor:

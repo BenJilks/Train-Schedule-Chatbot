@@ -3,7 +3,7 @@ import datetime
 import copy
 import math
 from dataclasses import dataclass
-from typing import Iterable, Iterator
+from typing import Iterable, Sequence
 from knowledge_base import TrainPath, TrainRoute, TrainRouteSegment, group
 from knowledge_base.dtd import TIPLOC, date_to_sql
 from knowledge_base.dtd import TimetableLocation, TrainTimetable, TimetableLink
@@ -12,12 +12,20 @@ from sqlalchemy.orm.session import Session
 
 @dataclass
 class JourneySegment:
+    train: TrainTimetable
     start: TimetableLocation
     end: TimetableLocation
 
+    def __hash__(self) -> int:
+        return (
+            hash(self.train) ^
+            hash(self.start) ^
+            hash(self.end))
+
 LocationRoute = list[str]
 TrainStops = list[TimetableLocation]
-Journey = list[JourneySegment]
+Journey = Sequence[JourneySegment]
+RouteAndJourneys = tuple[TrainRoute, list[Journey]]
 
 class Path:
     _stations: list[str]
@@ -189,14 +197,22 @@ def search_train_route(start: str,
                 return result
     return None
 
-def find_journeys(trains_by_paths: dict[TrainPath, list[TrainStops]],
+def train_timetable_from_train_uid(db: Session, train_uid: str) -> TrainTimetable:
+    return db.query(TrainTimetable)\
+        .filter(TrainTimetable.train_uid == train_uid)\
+        .first()
+
+def find_journeys(db: Session,
+                  trains_by_paths: dict[TrainPath, list[TrainStops]],
                   train_route: TrainRoute) -> list[Journey]:
     start_trains = trains_by_paths[train_route[0].path]
     journeys: list[Journey] = []
     for start_train in start_trains:
         first_start = start_train[-1]
         first_stop = next(filter(lambda x: x.location == train_route[0].stop_location, start_train))
-        journey: Journey = [JourneySegment(first_start, first_stop)]
+
+        train_timeable = train_timetable_from_train_uid(db, first_start.train_uid)
+        journey: Journey = [JourneySegment(train_timeable, first_start, first_stop)]
         for segment in train_route[1:]:
             trains = [(stop, train)
                 for train in trains_by_paths[segment.path]
@@ -208,14 +224,16 @@ def find_journeys(trains_by_paths: dict[TrainPath, list[TrainStops]],
 
             start, train = min(trains, key=lambda x: x[0].scheduled_departure_time)
             stop = next(filter(lambda x: x.location == segment.stop_location, train))
-            journey.append(JourneySegment(start, stop))
+
+            train_timeable = train_timetable_from_train_uid(db, first_start.train_uid)
+            journey.append(JourneySegment(train_timeable, start, stop))
         else:
             journeys.append(journey)
     return journeys
 
-def find_journeys_for_route(route: LocationRoute,
+def find_journeys_for_route(db: Session, route: LocationRoute,
                             all_train_stops: list[TimetableLocation]
-                            ) -> tuple[TrainRoute, list[Journey]] | None:
+                            ) -> RouteAndJourneys | None:
     train_stops = [stop for stop in all_train_stops if stop.location in route]
     stops_by_train_uid = sort_trains_by_uid(train_stops, route)
     trains_by_paths = group(
@@ -228,15 +246,17 @@ def find_journeys_for_route(route: LocationRoute,
     if train_route is None:
         return None
     
-    return train_route, find_journeys(trains_by_paths, train_route)
+    return train_route, find_journeys(db, trains_by_paths, train_route)
 
 def find_journeys_for_paths(db: Session, date: datetime.date,
-                            paths: Iterable[Path]) -> Iterator[tuple[TrainRoute, list[Journey]]]:
+                            paths: Iterable[Path]) -> Iterable[RouteAndJourneys]:
     all_train_stops = train_stops_from_paths(db, date, paths)
+    routes_and_journeys = []
     for route in [route for path in paths for route in path.routes()]:
-        result = find_journeys_for_route(route, all_train_stops)
+        result = find_journeys_for_route(db, route, all_train_stops)
         if not result is None:
-            yield result
+            routes_and_journeys.append(result)
+    return routes_and_journeys
 
 def crs_route_to_tiploc_route(db: Session, crs_route: LocationRoute) -> LocationRoute:
     crs_to_tiploc_map = {
@@ -248,11 +268,27 @@ def crs_route_to_tiploc_route(db: Session, crs_route: LocationRoute) -> Location
     return [crs_to_tiploc_map[crs] for crs in crs_route]
 
 def find_journeys_from_crs(db: Session, from_crs: str, to_crs: str,
-                           date: datetime.date) -> Iterator[Journey]:
+                           date: datetime.date) -> Iterable[RouteAndJourneys]:
     from_loc, to_loc = crs_route_to_tiploc_route(db, [from_crs, to_crs])
     found_paths = search_paths(db, 4, from_loc, to_loc)
+    return find_journeys_for_paths(db, date, found_paths)
 
-    train_routes = find_journeys_for_paths(db, date, found_paths)
-    for _, journeys in train_routes:
-        yield from journeys
+def filter_best_journeys(journeys: Iterable[RouteAndJourneys],
+                         count: int) -> Iterable[RouteAndJourneys]:
+    all_journeys = [
+        (route, journey)
+        for route, journey_list in journeys
+        for journey in journey_list]
+    all_journeys.sort(key=lambda x: x[1][-1].end.scheduled_arrival_time)
+
+    best_for_arrival_time = [
+        min(g, key=lambda x: x[1][0].start.scheduled_departure_time)
+        for g in group(all_journeys,
+            lambda x: x[1][-1].end.scheduled_arrival_time).values()]
+    
+    only_best = best_for_arrival_time[:count]
+    return [
+        (route_journeys[0][0], [journeys for _, journeys in route_journeys])
+        for _, route_journeys in group(
+            only_best, lambda x: hash(tuple(x[0]))).items()]
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from sqlalchemy.orm.session import Session
 from knowledge_base import TrainRoute, config
-from knowledge_base.dtd import TIPLOC
+from knowledge_base import tiploc_route_to_crs_route
 
 class HSPDays(Enum):
     Weekday = auto()
@@ -99,15 +99,6 @@ def train_details_for_segment(from_crs: str, to_crs: str,
                 yield from train_details_for_rid(rid)
     except:
         yield response.text
-
-def tiploc_route_to_crs_route(db: Session, tiploc_route: list[str]) -> list[str]:
-    tiploc_to_crs_map = {
-        tiploc: crs
-        for tiploc, crs in db\
-            .query(TIPLOC.tiploc_code, TIPLOC.crs_code)\
-            .filter(TIPLOC.tiploc_code.in_(tiploc_route))\
-            .all() }
-    return [tiploc_to_crs_map[tiploc] for tiploc in tiploc_route]
 
 def hsp_data_for_train_route(db: Session, train_route: TrainRoute, 
                              request: HSPRequest) -> Iterator[Iterator[HSPDetails | str]]:

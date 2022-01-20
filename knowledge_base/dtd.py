@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from sqlalchemy.orm.session import Session
 from sqlalchemy.sql.schema import Column, ForeignKey
 from sqlalchemy.sql.sqltypes import Boolean, Integer, String, Text
-from sqlalchemy.sql.sqltypes import Date, Enum, Time, Float
-from knowledge_base.feeds import Base, Feed, Record, RecordSet
+from sqlalchemy.sql.sqltypes import Date, Enum, Time
+from knowledge_base.feeds import Base, Feed, Record, RecordChunkGenerator, RecordSet
 from knowledge_base.feeds import date_to_sql, time_to_sql
 from knowledge_base.feeds import parse_date_ddmmyyyy, parse_date_yymmdd, parse_time
 from knowledge_base.progress import Progress
@@ -83,6 +83,8 @@ class TrainTimetable(Base):
     saturday = Column(Boolean)
     sunday = Column(Boolean)
     bank_holiday_running = Column(Boolean)
+    rsid = Column(String(8))
+    toc = Column(String(2))
 
     @staticmethod
     def day_to_column(day: int) -> Column:
@@ -131,6 +133,7 @@ class TIPLOC(Base):
     crs_code = Column(String(3), primary_key=True)
     description = Column(Text)
 
+"""
 class Station(Base):
     __tablename__ = 'station'
     location_crs = Column(String(3), index=True, primary_key=True)
@@ -156,6 +159,7 @@ class RouteLink(Base):
     start_node = Column(String(3), index=True, primary_key=True)
     end_node = Column(String(3), index=True, primary_key=True)
     map_code = Column(String(2), primary_key=True)
+"""
 
 @dataclass
 class State:
@@ -311,6 +315,8 @@ def record_for_mca_entry(entry: str, state: State) -> list[Record]:
 
         assert not state.has_extra_details_record
         state.has_extra_details_record = True
+        state.current_train['rsid'] = entry[14:22]
+        state.current_train['toc'] = entry[11:13]
         return []
 
     if entry_type == 'LO':
@@ -390,6 +396,7 @@ def record_for_mca_entry(entry: str, state: State) -> list[Record]:
 
     return []
 
+"""
 def record_for_rgd_entry(entry: str, _: State) -> list[Record]:
     if len(entry) == 0 or entry[0] == '/':
         return []
@@ -438,6 +445,7 @@ def record_for_rgr_entry(entry: str, state: State) -> list[Record]:
             end_node = end_node,
             map_code = map_code))
         for i, map_code in enumerate(map_codes)]
+"""
 
 def entry_parser_for_file(file: str) -> Callable[[str, State], list[Record]] | None:
     if len(file) < 3:
@@ -449,8 +457,8 @@ def entry_parser_for_file(file: str) -> Callable[[str, State], list[Record]] | N
         'FSC': record_for_fsc_entry,
         'TTY': record_for_tty_entry,
         'MCA': record_for_mca_entry,
-        'RGD': record_for_rgd_entry,
-        'RGL': record_for_rgl_entry,
+        # 'RGD': record_for_rgd_entry,
+        # 'RGL': record_for_rgl_entry,
         # 'RGS': record_for_rgs_entry,
         # 'RGR': record_for_rgr_entry,
     }
@@ -460,37 +468,24 @@ def records_in_dtd_file(chunk_queue: Queue[RecordSet],
                         entry_parser: Callable[[str, State], list[Record]],
                         path: str, file: str, 
                         progress: Progress):
-    record_chunk: RecordSet = {}
-    record_chunk_count = 0
+    with RecordChunkGenerator(chunk_queue) as chunk_generator:
+        last_progress_report = 0
+        total_size_bytes = os.path.getsize(path + '/' + file)
+        bytes_processed = 0
 
-    last_progress_report = 0
-    total_size_bytes = os.path.getsize(path + '/' + file)
-    bytes_processed = 0
+        with open(path + '/' + file, 'r') as f:
+            state = State()
+            line_no = 0
+            for entry_line in f:
+                line_no += 1
 
-    with open(path + '/' + file, 'r') as f:
-        state = State()
-        line_no = 0
-        for entry_line in f:
-            line_no += 1
+                bytes_processed += len(entry_line)
+                if time.time() - last_progress_report >= 1:
+                    progress.report(file, bytes_processed, total_size_bytes)
+                    last_progress_report = time.time()
 
-            bytes_processed += len(entry_line)
-            if time.time() - last_progress_report >= 1:
-                progress.report(file, bytes_processed, total_size_bytes)
-                last_progress_report = time.time()
-
-            for table, entry in entry_parser(entry_line.strip(), state):
-                record_chunk.setdefault(table, []).append(entry)
-                record_chunk_count += 1
-
-            if record_chunk_count < config.RECORD_CHUNK_SIZE:
-                continue
-            chunk_queue.put(record_chunk)
-            record_chunk = {}
-            record_chunk_count = 0
-
-    if record_chunk_count > 0:
-        chunk_queue.put(record_chunk)
-    progress.report(file, total_size_bytes, total_size_bytes)
+                for record in entry_parser(entry_line.strip(), state):
+                    chunk_generator.put(record)
 
 def records_in_dtd_file_set(executor: Executor, chunk_queue: Queue[RecordSet | None],
                             path: str, progress: Progress) -> Iterable[Future]:
@@ -563,6 +558,7 @@ class DTDTimetableFeed(DTDFeed):
             TimetableLocation, TimetableLink,
             TrainTimetable, TIPLOC]
 
+"""
 class DTDRouteingFeed(DTDFeed):
     def feed_api_url(self) -> str:
         return '2.0/routeing'
@@ -574,6 +570,7 @@ class DTDRouteingFeed(DTDFeed):
         return [
             Station, StationLink,
             Route, RouteLink]
+"""
 
 Feed.register(DTDFaresFeed)
 Feed.register(DTDTimetableFeed)
