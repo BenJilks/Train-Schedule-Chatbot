@@ -3,7 +3,7 @@ import datetime
 import copy
 import math
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Union
 from knowledge_base import TrainPath, TrainRoute, TrainRouteSegment, group
 from knowledge_base.dtd import TIPLOC, date_to_sql
 from knowledge_base.dtd import TimetableLocation, TrainTimetable, TimetableLink
@@ -177,7 +177,7 @@ def search_train_route(start: str,
                        train_paths: Iterable[TrainPath],
                        route: LocationRoute,
                        train_route: TrainRoute = [],
-                       ) -> TrainRoute | None:
+                       ) -> Union[TrainRoute, None]:
     if len(train_route) > 3:
         return None
 
@@ -233,7 +233,7 @@ def find_journeys(db: Session,
 
 def find_journeys_for_route(db: Session, route: LocationRoute,
                             all_train_stops: list[TimetableLocation]
-                            ) -> RouteAndJourneys | None:
+                            ) -> Union[RouteAndJourneys, None]:
     train_stops = [stop for stop in all_train_stops if stop.location in route]
     stops_by_train_uid = sort_trains_by_uid(train_stops, route)
     trains_by_paths = group(

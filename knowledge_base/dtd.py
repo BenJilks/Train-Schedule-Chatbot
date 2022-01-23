@@ -5,7 +5,7 @@ import enum
 from zipfile import ZipFile
 from sqlalchemy.orm.util import aliased
 from queue import Queue
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Union
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
 from sqlalchemy.orm.session import Session
@@ -163,7 +163,7 @@ class RouteLink(Base):
 
 @dataclass
 class State:
-    current_train: dict | None = None
+    current_train: Union[dict, None] = None
     train_route_index: int = 0
     has_terminated: bool = False
     has_extra_details_record: bool = False
@@ -449,7 +449,7 @@ def record_for_rgr_entry(entry: str, state: State) -> list[Record]:
         for i, map_code in enumerate(map_codes)]
 """
 
-def entry_parser_for_file(file: str) -> Callable[[str, State], list[Record]] | None:
+def entry_parser_for_file(file: str) -> Union[Callable[[str, State], list[Record]], None]:
     if len(file) < 3:
         return None
 
@@ -489,7 +489,7 @@ def records_in_dtd_file(chunk_queue: Queue[RecordSet],
                 for record in entry_parser(entry_line.strip(), state):
                     chunk_generator.put(record)
 
-def records_in_dtd_file_set(executor: Executor, chunk_queue: Queue[RecordSet | None],
+def records_in_dtd_file_set(executor: Executor, chunk_queue: Queue[Union[RecordSet, None]],
                             path: str, progress: Progress) -> Iterable[Future]:
     tasks: list[Future] = []
     for file in os.listdir(path):
@@ -520,7 +520,7 @@ def generate_precomputed_tables(db: Session):
 class DTDFeed(Feed):
     def records_in_feed(self,
                         executor: Executor,
-                        chunk_queue: Queue[RecordSet | None],
+                        chunk_queue: Queue[Union[RecordSet, None]],
                         path: str,
                         progress: Progress) -> Iterable[Future]:
         zip_file_path = os.path.join(path, self.file_name())

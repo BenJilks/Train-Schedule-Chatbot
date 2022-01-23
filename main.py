@@ -1,5 +1,5 @@
 import datetime
-from typing import Callable
+from typing import Callable, Union
 from interface.response import RoutePlanningState, UserInfo, UserLocation, format_delays_response
 from interface.response import format_pending_response
 from interface.response import format_journey_response
@@ -43,7 +43,7 @@ def find_journeys(db: Session, from_crs: str, to_crs: str,
     route_journeys.sort(key = lambda x: order_key(x[1]))
     return route_journeys
 
-def find_delays(db: Session, model: Model, journey: Journey, date: datetime.date) -> int | None:
+def find_delays(db: Session, model: Model, journey: Journey, date: datetime.date) -> Union[int, None]:
     start_segment = journey[0]
     start_tiploc = start_segment.start.location
     end_tiploc = start_segment.end.location
@@ -118,7 +118,7 @@ def handle_bot_conversation_state(bot: Mastodon,
                                   message: Message, 
                                   state: RoutePlanningState,
                                   db: Session,
-                                  model: Model) -> Message | None:
+                                  model: Model) -> Union[Message, None]:
     raw_text_message_content = strip_html(message.text)
     gather_information(db, raw_text_message_content, state)
     print(f'Got message { raw_text_message_content }')

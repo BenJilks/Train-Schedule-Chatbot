@@ -1,9 +1,8 @@
 import datetime
 import math
-from dataclasses import dataclass
-from typing import Iterable
-
 import numpy
+from dataclasses import dataclass
+from typing import Iterable, Union
 from knowledge_base.hsp import HSPDays, HSPRequest
 from knowledge_base.hsp import hsp_route_statistics
 from tensorflow.keras.models import Model, load_model
@@ -97,7 +96,7 @@ def open_delays_model(file_path: str) -> DelaysModel:
     return load_model(file_path)
 
 def get_stat_at(stats: Iterable[TrainRouteStats],
-                departure_time: datetime.time) -> TrainRouteStats | None:
+                departure_time: datetime.time) -> Union[TrainRouteStats, None]:
     closest = None
     closest_offset = math.inf
     for stat in stats:
@@ -112,7 +111,7 @@ def get_stat_at(stats: Iterable[TrainRouteStats],
 def delay_for_route(model: DelaysModel,
                     from_crs: str, to_crs: str,
                     date: datetime.date,
-                    depature_time: datetime.time) -> int | None:
+                    depature_time: datetime.time) -> Union[int, None]:
     stats = sample_route_stats(from_crs, to_crs, date, depature_time.hour)
     stat = get_stat_at(stats, depature_time)
     if stat is None:

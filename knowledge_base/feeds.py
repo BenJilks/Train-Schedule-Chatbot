@@ -11,7 +11,7 @@ import shutil
 import datetime
 import traceback
 import config
-from typing import Iterable
+from typing import Iterable, Union
 from abc import ABC, abstractmethod
 from sqlalchemy.sql.schema import Column
 from sqlalchemy.sql.sqltypes import Integer, Text
@@ -83,7 +83,7 @@ class Feed(ABC):
     @abstractmethod
     def records_in_feed(self,
                         executor: Executor,
-                        chunk_queue: Queue[RecordSet | None],
+                        chunk_queue: Queue[Union[RecordSet, None]],
                         path: str,
                         progress: Progress) -> Iterable[Future]:
         ...
@@ -223,7 +223,7 @@ def flush_record_chunk(db: Session, record_chunk: RecordSet,
     report_flushing_progress(progress, written + chunk_count, 0, queue_size)
 
 
-def batch_and_flush_chunks(db: Session, chunk_queue: Queue[RecordSet | None],
+def batch_and_flush_chunks(db: Session, chunk_queue: Queue[Union[RecordSet, None]],
                            progress: Progress):
     current_chunk: RecordSet = {}
     current_chunk_count = 0
@@ -276,7 +276,7 @@ def update_feeds(db: Session, executor: Executor, feeds: Iterable[Feed]):
         for table in feed.associated_tables():
             db.query(table).delete()
 
-    chunk_queue: Queue[RecordSet | None] = Queue(maxsize = config.MAX_QUEUE_SIZE)
+    chunk_queue: Queue[Union[RecordSet, None]] = Queue(maxsize = config.MAX_QUEUE_SIZE)
     write_tasks: list[Future] = []
     for task in as_completed(download_tasks):
         feed, path = task.result()

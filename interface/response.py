@@ -1,7 +1,7 @@
 import datetime
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Iterable
+from typing import Iterable, Union
 from interface.bot import ConversationState
 from knowledge_base.dtd import TicketType
 from knowledge_base.kb import Incident
@@ -48,9 +48,9 @@ class UserInfo:
     from_loc: UserLocation
     to_loc: UserLocation
     journey: Journey
-    alt_journey: Journey | None
+    alt_journey: Union[Journey, None]
     incidents: list[Incident]
-    possible_delay: int | None
+    possible_delay: Union[int, None]
     tickets: list[tuple[int, TicketType]]
 
 class TicketFor(Enum):
@@ -59,13 +59,13 @@ class TicketFor(Enum):
 
 @dataclass
 class RoutePlanningState(ConversationState):
-    from_loc: UserLocation | None = None
-    to_loc: UserLocation | None = None
+    from_loc: Union[UserLocation, None] = None
+    to_loc: Union[UserLocation, None] = None
     date: datetime.date = datetime.date.today()
     time: datetime.time = datetime.datetime.now().time()
     request_incidents: bool = True
     ticket_for: TicketFor = TicketFor.Adult
-    user_info: UserInfo | None = None
+    user_info: Union[UserInfo, None] = None
 
 def format_pending_response(state: RoutePlanningState) -> str:
     assert not state.from_loc is None
@@ -76,7 +76,7 @@ def format_pending_response(state: RoutePlanningState) -> str:
         date = state.date,
         time = state.time)
 
-def format_price(price: int | None) -> str:
+def format_price(price: Union[int, None]) -> str:
     if price is None:
         return 'None'
     pounds = price // 100
@@ -138,13 +138,13 @@ def format_incidents_response(incidents: Iterable[Incident]) -> str:
     return incidents_template.format(
         incidents = incidents_str)
 
-def format_possible_delay(possible_delay: int | None) -> str:
+def format_possible_delay(possible_delay: Union[int, None]) -> str:
     if possible_delay is None:
         return 'on time'
     return f'up to { possible_delay } minutes late'
 
-def format_delays_response(possible_delay: int | None,
-                           alt_journey: Journey | None) -> str:
+def format_delays_response(possible_delay: Union[int, None],
+                           alt_journey: Union[Journey, None]) -> str:
     delay_str = format_possible_delay(possible_delay)
     if alt_journey is None:
         return delay_template.format(delay = delay_str)

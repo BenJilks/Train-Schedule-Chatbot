@@ -1,5 +1,5 @@
 import regex
-from typing import Iterable
+from typing import Iterable, Union
 from sqlalchemy.orm.session import Session
 from sqlalchemy.sql.elements import literal
 from knowledge_base import TrainRoute
@@ -15,7 +15,7 @@ def incidents_for_toc(db: Session, toc: str) -> Iterable[Incident]:
         .filter(IncidentAffectedOperators.operator_toc == toc)\
         .all()
 
-def tiploc_to_name(db: Session, *tiplocs: str) -> list[str] | str:
+def tiploc_to_name(db: Session, *tiplocs: str) -> Union[list[str], str]:
     tiploc_to_name = {
         tiploc: name 
         for tiploc, name in db.query(TIPLOC.tiploc_code, Station.name)\
@@ -40,7 +40,7 @@ def generate_names_to_location_map(db: Session) -> dict[str, str]:
             .all()}
 
 def parse_incident_routes(name_location_map: dict[str, str],
-                          route_text: str) -> tuple[list[str], list[str]] | None:
+                          route_text: str) -> Union[tuple[list[str], list[str]], None]:
     and_index = route_text.find('and')
     if and_index == -1:
         return None

@@ -1,7 +1,8 @@
+import sys
 from dataclasses import dataclass
 from queue import Queue
 from threading import Lock
-import sys
+from typing import Union
 
 BAR_LENGTH = 50
 NAME_LEN = 20
@@ -13,7 +14,7 @@ class ProgressBar:
 
 class Progress:
     _bars: dict[str, ProgressBar]
-    _last_bar_count: int | None
+    _last_bar_count: Union[int, None]
     _mutex: Lock
     _report_queue: Queue[tuple[str, int, int]]
 

@@ -2,7 +2,7 @@ import os
 import time
 from datetime import datetime
 from queue import Queue
-from typing import Iterable
+from typing import Iterable, Union
 from concurrent.futures import Executor, Future
 from sqlalchemy.sql.schema import Column
 from sqlalchemy.sql.sqltypes import Boolean, DateTime, String, Text
@@ -113,7 +113,7 @@ class KBIncidents(Feed):
 
     def records_in_feed(self,
                         executor: Executor,
-                        chunk_queue: Queue[RecordSet | None],
+                        chunk_queue: Queue[Union[RecordSet, None]],
                         path: str,
                         progress: Progress) -> Iterable[Future]:
         tree = ET.parse(os.path.join(path, self.file_name()))
@@ -137,7 +137,7 @@ class KBStations(Feed):
 
     def records_in_feed(self,
                         executor: Executor,
-                        chunk_queue: Queue[RecordSet | None],
+                        chunk_queue: Queue[Union[RecordSet, None]],
                         path: str,
                         progress: Progress) -> Iterable[Future]:
         tree = ET.parse(os.path.join(path, self.file_name()))

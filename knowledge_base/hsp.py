@@ -4,7 +4,7 @@ import requests
 import json
 import sys
 import config
-from typing import Any
+from typing import Any, Union
 from dataclasses import dataclass, fields
 from enum import Enum, auto
 
@@ -59,7 +59,7 @@ class HSPRequest:
     days: HSPDays
     from_time: datetime.time = datetime.time(0, 0)
     to_time: datetime.time = datetime.time(23, 59)
-    toc_filter: list[str] | None = None
+    toc_filter: Union[list[str], None] = None
 
 @dataclass(init=False)
 class HSPDetails:
@@ -106,7 +106,7 @@ class HSPService:
         self.attributes = HSPAttributes(**serviceAttributesMetrics)
         self.metrics = [HSPMetric(**metric) for metric in Metrics]
 
-    def time_late(self) -> int | None:
+    def time_late(self) -> Union[int, None]:
         if len(self.metrics) == 0:
             return None
 
