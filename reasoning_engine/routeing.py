@@ -273,8 +273,7 @@ def find_journeys_from_crs(db: Session, from_crs: str, to_crs: str,
     found_paths = search_paths(db, 4, from_loc, to_loc)
     return find_journeys_for_paths(db, date, found_paths)
 
-def filter_best_journeys(journeys: Iterable[RouteAndJourneys],
-                         count: int) -> Iterable[RouteAndJourneys]:
+def filter_best_journeys(journeys: Iterable[RouteAndJourneys]) -> Iterable[RouteAndJourneys]:
     all_journeys = [
         (route, journey)
         for route, journey_list in journeys
@@ -286,9 +285,8 @@ def filter_best_journeys(journeys: Iterable[RouteAndJourneys],
         for g in group(all_journeys,
             lambda x: x[1][-1].end.scheduled_arrival_time).values()]
     
-    only_best = best_for_arrival_time[:count]
     return [
         (route_journeys[0][0], [journeys for _, journeys in route_journeys])
         for _, route_journeys in group(
-            only_best, lambda x: hash(tuple(x[0]))).items()]
+            best_for_arrival_time, lambda x: hash(tuple(x[0]))).items()]
 

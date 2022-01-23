@@ -4,7 +4,6 @@ import datetime
 import enum
 from zipfile import ZipFile
 from sqlalchemy.orm.util import aliased
-from knowledge_base import config
 from queue import Queue
 from typing import Callable, Iterable
 from concurrent.futures import Executor, Future
@@ -35,6 +34,7 @@ class FlowRecord(Base):
     origin_code = Column(String(4), ForeignKey('location_record.ncl_code'), index=True)
     destination_code = Column(String(4), ForeignKey('location_record.ncl_code'), index=True)
     direction = Column(String(1))
+    toc = Column(String(2))
     end_date = Column(Date)
     start_date = Column(Date)
 
@@ -222,7 +222,9 @@ def record_for_ffl_entry(entry: str, state: State) -> list[Record]:
             origin_code = entry[2:6],
             destination_code = entry[6:10],
             direction = entry[19],
-            end_date = end_date))]
+            toc = entry[36:39],
+            end_date = end_date,
+            start_date = start_date))]
 
     if entry_type == 'RT':
         flow_id = int(entry[2:9])
@@ -529,7 +531,7 @@ class DTDFeed(Feed):
         return records_in_dtd_file_set(executor, chunk_queue, path, progress)
 
     def expiry_length(self) -> int:
-        return config.DTD_EXPIRY
+        return 60 * 60 * 24 * 365 # 1 Year
 
 class DTDFaresFeed(DTDFeed):
     def feed_api_url(self) -> str:

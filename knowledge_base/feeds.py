@@ -10,11 +10,11 @@ import sqlalchemy
 import shutil
 import datetime
 import traceback
+import config
 from typing import Iterable
 from abc import ABC, abstractmethod
 from sqlalchemy.sql.schema import Column
 from sqlalchemy.sql.sqltypes import Integer, Text
-from knowledge_base import config
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, Executor, Future
 from concurrent.futures import as_completed, wait, FIRST_EXCEPTION
@@ -150,12 +150,11 @@ def download_feed_file(token: str, data_path: str, feed: Feed,
     }
     response = requests.get(FARES_URL, headers=HEADERS, stream=True)
 
-    if not 'Content-Length' in response.headers:
-        print(response.headers, sys.stderr)
-        raise Exception('Malformed feed file response header')
+    length = 0
+    if 'Content-Length' in response.headers:
+        length = int(response.headers['Content-Length'])
 
     file_name = feed.file_name()
-    length = int(response.headers['Content-Length'])
     path = os.path.join(data_path, feed.unique_path_id())
     os.makedirs(path)
 

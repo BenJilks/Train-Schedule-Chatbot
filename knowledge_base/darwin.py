@@ -1,4 +1,4 @@
-from knowledge_base import config
+import config
 from suds.client import Client
 from suds.sax.element import Element
 

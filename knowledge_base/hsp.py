@@ -2,12 +2,33 @@ from __future__ import annotations
 import datetime
 import requests
 import json
-from typing import Iterator
-from dataclasses import dataclass
+import sys
+import config
+from typing import Any
+from dataclasses import dataclass, fields
 from enum import Enum, auto
-from sqlalchemy.orm.session import Session
-from knowledge_base import TrainRoute, config
-from knowledge_base import tiploc_route_to_crs_route
+
+def init_from_strings(instance: Any, **args):
+    for attr in fields(type(instance)):
+        if not attr.name in args:
+            continue
+
+        str_value = args[attr.name]
+        real_value: Any = None
+        if attr.type == 'int':
+            real_value = int(str_value)
+        elif attr.type == 'bool':
+            real_value = (str_value == 'true')
+        elif attr.type == 'str':
+            real_value = str_value
+        elif attr.type == 'datetime.time':
+            real_value = datetime.datetime.strptime(str_value, '%H%M').time()
+        elif attr.type == 'list[str]':
+            real_value = str_value
+
+        if real_value is None:
+            raise Exception(f"Unsupported from string type '{ attr.type }'")
+        setattr(instance, attr.name, real_value)
 
 class HSPDays(Enum):
     Weekday = auto()
@@ -33,13 +54,14 @@ class HSPDays(Enum):
 
 @dataclass
 class HSPRequest:
-    from_time: datetime.time
-    to_time: datetime.time
     from_date: datetime.date
     to_date: datetime.date
     days: HSPDays
+    from_time: datetime.time = datetime.time(0, 0)
+    to_time: datetime.time = datetime.time(23, 59)
+    toc_filter: list[str] | None = None
 
-@dataclass
+@dataclass(init=False)
 class HSPDetails:
     location: str
     gbtt_ptd: datetime.time
@@ -48,62 +70,80 @@ class HSPDetails:
     actual_ta: datetime.time
     late_canc_reason: str
 
-def train_details_for_rid(rid: str) -> Iterator[HSPDetails]:
-    data = { 'rid': rid }
-    headers = { "Content-Type": "application/json" }
-    response = requests.post(
-        config.HSP_SERVICE_DETAILS_API_URL,
-        auth=config.CREDENTIALS,
-        headers=headers,
-        json=data)
-    
-    def parse_time(time_str: str) -> datetime.time:
-        return datetime.datetime.strptime(time_str, '%H%I').time()
+    def __init__(self, **args):
+        init_from_strings(self, **args)
 
-    data = json.loads(response.text)
-    details = data['serviceAttributesDetails']
-    for location in details['locations']:
-        yield HSPDetails(
-            location['location'],
-            parse_time(location['gbtt_ptd']),
-            parse_time(location['gbtt_ptd']),
-            parse_time(location['gbtt_ptd']),
-            parse_time(location['gbtt_ptd']),
-            location['late_canc_reason'])
+@dataclass(init=False)
+class HSPAttributes:
+    origin_location: str
+    destination_location: str
+    gbtt_ptd: datetime.time
+    gbtt_pta: datetime.time
+    toc_code: str
+    matched_services: int
+    rids: list[str]
 
-def train_details_for_segment(from_crs: str, to_crs: str,
-                              request: HSPRequest) -> Iterator[HSPDetails | str]:
-    data = {
+    def __init__(self, **args):
+        init_from_strings(self, **args)
+
+@dataclass(init=False)
+class HSPMetric:
+    tolerance_value: int
+    num_not_tolerance: int
+    num_tolerance: int
+    percent_tolerance: int
+    global_tolerance: bool
+
+    def __init__(self, **args):
+        init_from_strings(self, **args)
+
+@dataclass(init=False)
+class HSPService:
+    attributes: HSPAttributes
+    metrics: list[HSPMetric]
+
+    def __init__(self, serviceAttributesMetrics, Metrics):
+        self.attributes = HSPAttributes(**serviceAttributesMetrics)
+        self.metrics = [HSPMetric(**metric) for metric in Metrics]
+
+    def time_late(self) -> int | None:
+        if len(self.metrics) == 0:
+            return None
+
+        metric = max(self.metrics, key=lambda x: x.tolerance_value)
+        if metric.num_not_tolerance == 0:
+            return None
+        
+        return metric.tolerance_value
+
+def hsp_route_statistics(from_crs: str, to_crs: str,
+                         request: HSPRequest) -> list[HSPService]:
+    data: dict[str, Any] = {
         'from_loc': from_crs,
         'to_loc': to_crs,
-        'from_time': request.from_time.strftime('%H%I'),
-        'to_time': request.to_time.strftime('%H%I'),
+        'from_time': request.from_time.strftime('%H%M'),
+        'to_time': request.to_time.strftime('%H%M'),
         'from_date': request.from_date.strftime('%Y-%m-%d'),
         'to_date': request.to_date.strftime('%Y-%m-%d'),
         'days': request.days.format(),
+        'tolerance': ['0', '5', '10', '30'],
     }
+    if not request.toc_filter is None:
+        data['toc_filter'] = request.toc_filter
 
     headers = { "Content-Type": "application/json" }
     response = requests.post(
         config.HSP_SERVICE_METRICS_API_URL,
         auth=config.CREDENTIALS,
-        headers=headers,
-        json=data)
+        headers=headers, json=data)
 
     try:
+        result = []
         data = json.loads(response.text)
         for service in data['Services']:
-            metrics = service['serviceAttributesMetrics']
-            rids = metrics['rids']
-            for rid in rids:
-                yield from train_details_for_rid(rid)
-    except:
-        yield response.text
-
-def hsp_data_for_train_route(db: Session, train_route: TrainRoute, 
-                             request: HSPRequest) -> Iterator[Iterator[HSPDetails | str]]:
-    for segment in train_route:
-        start, stop = tiploc_route_to_crs_route(db,
-            [segment.start_location, segment.stop_location])
-        yield train_details_for_segment(start, stop, request)
+            result.append(HSPService(**service))
+        return result
+    except Exception as exception:
+        print(response.text, file=sys.stderr)
+        raise exception
 

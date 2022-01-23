@@ -1,87 +1,133 @@
-import regex
+import datetime
+import math
+from dataclasses import dataclass
 from typing import Iterable
-from sqlalchemy.orm.session import Session
-from knowledge_base.dtd import TIPLOC
-from knowledge_base.kb import Incident, IncidentAffectedOperators, Station
-from reasoning_engine.routeing import Journey, RouteAndJourneys
 
-def incidents_for_toc(db: Session, toc: str) -> Iterable[Incident]:
-    return db.query(Incident)\
-        .select_from(IncidentAffectedOperators)\
-        .distinct()\
-        .join(Incident, Incident.incident_number == IncidentAffectedOperators.incident_number)\
-        .filter(IncidentAffectedOperators.operator_toc == toc)\
-        .all()
+import numpy
+from knowledge_base.hsp import HSPDays, HSPRequest
+from knowledge_base.hsp import hsp_route_statistics
+from tensorflow.keras.models import Model, load_model
+from tensorflow.nn import softmax
 
-def tiploc_to_name(db: Session, tiploc: str) -> str:
-    return db.query(Station.name)\
-        .select_from(Station, TIPLOC)\
-        .filter(Station.crs_code == TIPLOC.crs_code)\
-        .filter(TIPLOC.tiploc_code == tiploc)\
-        .first()[0]
+DelaysModel = Model
 
-def generate_names_to_location_map(db: Session) -> dict[str, str]:
-    return {
-        name: tiploc
-        for name, tiploc in db.query(Station.name, TIPLOC.tiploc_code)\
-            .select_from(Station, TIPLOC)\
-            .filter(Station.crs_code == TIPLOC.crs_code)\
-            .all()}
+def date_to_float(date: datetime.date) -> float:
+    date_int = date.year << 16 | date.month << 8 | date.day
+    return float(date_int)
 
-def parse_incident_routes(name_location_map: dict[str, str],
-                          route_text: str) -> tuple[list[str], list[str]] | None:
-    and_index = route_text.find('and')
-    if and_index == -1:
+def time_to_float(time: datetime.time) -> float:
+    time_int = time.hour << 8 | time.minute
+    return float(time_int)
+
+def crs_to_float(crs: str) -> float:
+    return float(ord(crs[0]) << 16 | ord(crs[1]) << 8 | ord(crs[1]))
+
+@dataclass
+class TrainRouteStats:
+    toc: str
+    from_crs: str
+    to_crs: str
+    date: datetime.date
+    departure_time: datetime.time
+    arrival_time: datetime.time
+    late_0m: int
+    late_5m: int
+    late_10m: int
+    late_30m: int
+    was_late_0m: bool
+    was_late_5m: bool
+    was_late_10m: bool
+    was_late_30m: bool
+
+    def as_model_input(self):
+        return numpy.array([[
+            float(self.late_0m),
+            float(self.late_5m),
+            float(self.late_10m),
+            float(self.late_30m)]])
+
+def sample_route_stats(from_crs: str, to_crs: str,
+                       date: datetime.date, hour: int
+                       ) -> list[TrainRouteStats]:
+    from_time = datetime.time(hour)
+    to_time = datetime.time(hour + 1) if hour != 23 else datetime.time(hour, 59)
+    today_stats = hsp_route_statistics(from_crs, to_crs, HSPRequest(
+        from_date = date,
+        to_date = date,
+        from_time = from_time,
+        to_time = to_time,
+        days = HSPDays.from_date(date)))
+
+    tocs = [service.attributes.toc_code for service in today_stats]
+    last_week_stats = hsp_route_statistics(from_crs, to_crs, HSPRequest(
+        from_date = date - datetime.timedelta(days=1, weeks=2),
+        to_date = date - datetime.timedelta(days=1),
+        from_time = from_time,
+        to_time = to_time,
+        days = HSPDays.from_date(date),
+        toc_filter = tocs))
+    
+    training_data = []
+    for service in last_week_stats:
+        toc = service.attributes.toc_code
+        depature_time = service.attributes.gbtt_ptd
+        arrival_time = service.attributes.gbtt_pta
+        late = {
+            metric.tolerance_value: metric.num_not_tolerance
+            for metric in service.metrics }
+
+        today_trains = [train
+            for train in today_stats
+            if (train.attributes.toc_code == toc and
+                train.attributes.gbtt_ptd == depature_time and
+                train.attributes.gbtt_pta == arrival_time)]
+        if len(today_trains) == 0:
+            continue
+        today_train = today_trains[0]
+        time_late = today_train.time_late()
+        training_data.append(TrainRouteStats(
+            toc, from_crs, to_crs,
+            date, depature_time, arrival_time,
+            late[0], late[5], late[10], late[30],
+            time_late == 0, time_late == 5,
+            time_late == 10, time_late == 30))
+    return training_data
+
+def open_delays_model(file_path: str) -> DelaysModel:
+    return load_model(file_path)
+
+def get_stat_at(stats: Iterable[TrainRouteStats],
+                departure_time: datetime.time) -> TrainRouteStats | None:
+    closest = None
+    closest_offset = math.inf
+    for stat in stats:
+        hour_offset = abs(stat.departure_time.hour - departure_time.hour)
+        minute_offset = abs(stat.departure_time.minute - departure_time.minute)
+        offset = hour_offset * 60 + minute_offset
+        if offset < closest_offset:
+            closest = stat
+            closest_offset = offset
+    return closest
+
+def delay_for_route(model: DelaysModel,
+                    from_crs: str, to_crs: str,
+                    date: datetime.date,
+                    depature_time: datetime.time) -> int | None:
+    stats = sample_route_stats(from_crs, to_crs, date, depature_time.hour)
+    stat = get_stat_at(stats, depature_time)
+    if stat is None:
         return None
 
-    also_index = route_text.find('also')
-    if also_index != -1:
-        route_text = route_text[:also_index]
+    prediction = model(stat.as_model_input()).numpy()
+    probability = softmax(prediction).numpy()[0]
+    max_prob = max(probability)
+    if max_prob < 0.5:
+        return None
 
-    location_indexes = [
-        (name, route_text.find(name))
-        for name in name_location_map.keys()
-        if name in route_text]
-
-    from_locations = [
-        name_location_map[name]
-        for name, index in location_indexes
-        if index < and_index]
-    to_locations = [
-        name_location_map[name]
-        for name, index in location_indexes
-        if index > and_index]
-    return from_locations, to_locations
-
-def strip_html(html: str) -> str:
-    stripped = html
-    while True:
-        new_stripped = regex.sub('<[^>]*>', '', html)
-        if new_stripped == stripped:
-            return stripped
-        stripped = new_stripped
-
-def find_delays(db: Session,
-                routes_and_journeys: Iterable[RouteAndJourneys]
-                ) -> list[tuple[Journey, Incident]]:
-    name_location_map = generate_names_to_location_map(db)
-    possible_incidents: set[tuple[Journey, Incident]] = set()
-
-    for route, journeys in routes_and_journeys:
-        for journey in journeys:
-            for route_segment, journey_segment in zip(route, journey):
-                toc = journey_segment.train.toc
-                incidents = incidents_for_toc(db, toc)
-                for incident in incidents:
-                    result = parse_incident_routes(name_location_map, incident.route_affected)
-                    if result is None:
-                        continue
-
-                    from_locations, to_locations = result
-                    if not any([location in route_segment.path for location in from_locations]):
-                        continue
-                    if not any([location in route_segment.path for location in to_locations]):
-                        continue
-                    possible_incidents.add((tuple(journey), incident))
-    return list(possible_incidents)
+    max_index = probability.index(max_prob)
+    if max_index == 0: return 0
+    if max_index == 1: return 5
+    if max_index == 2: return 10
+    if max_index == 3: return 30
+    return None
 
