@@ -5,7 +5,7 @@ from queue import Queue
 from typing import Iterable, Union
 from concurrent.futures import Executor, Future
 from sqlalchemy.sql.schema import Column
-from sqlalchemy.sql.sqltypes import Boolean, DateTime, String, Text
+from sqlalchemy.sql.sqltypes import Boolean, DateTime, Float, String, Text
 from knowledge_base.feeds import Base, Feed, RecordChunkGenerator, RecordSet
 from knowledge_base.progress import Progress
 import xml.etree.ElementTree as ET
@@ -35,6 +35,8 @@ class Station(Base):
     __tablename__ = 'station'
     crs_code = Column(String(3), primary_key=True)
     name = Column(Text)
+    latitude = Column(Float)
+    longitude = Column(Float)
 
 def parse_datetime(datetime_str: str) -> datetime:
     return datetime.strptime(datetime_str.split('.')[0], '%Y-%m-%dT%H:%M:%S')
@@ -90,7 +92,9 @@ def records_for_stations(stations: list[ET.Element], chunk_queue: Queue[RecordSe
         for station in stations:
             chunk_generator.put((Station, dict(
                 crs_code = station.findtext('s:CrsCode', namespaces=NAMESPACES),
-                name = station.findtext('s:Name', namespaces=NAMESPACES))))
+                name = station.findtext('s:Name', namespaces=NAMESPACES),
+                latitude = station.findtext('s:Latitude', namespaces=NAMESPACES),
+                longitude = station.findtext('s:Longitude', namespaces=NAMESPACES))))
 
             stations_done += 1
             if time.time() - time_since_last_progress_report >= 1:

@@ -117,7 +117,7 @@ class HSPService:
         return metric.tolerance_value
 
 def hsp_route_statistics(from_crs: str, to_crs: str,
-                         request: HSPRequest) -> list[HSPService]:
+                         request: HSPRequest) -> Union[list[HSPService], None]:
     data: dict[str, Any] = {
         'from_loc': from_crs,
         'to_loc': to_crs,
@@ -132,10 +132,14 @@ def hsp_route_statistics(from_crs: str, to_crs: str,
         data['toc_filter'] = request.toc_filter
 
     headers = { "Content-Type": "application/json" }
-    response = requests.post(
-        config.HSP_SERVICE_METRICS_API_URL,
-        auth=config.CREDENTIALS,
-        headers=headers, json=data)
+    try:
+        response = requests.post(
+            config.HSP_SERVICE_METRICS_API_URL,
+            auth=config.CREDENTIALS,
+            headers=headers, json=data,
+            timeout = 4)
+    except:
+        return None
 
     try:
         result = []

@@ -47,7 +47,7 @@ class TrainRouteStats:
 
 def sample_route_stats(from_crs: str, to_crs: str,
                        date: datetime.date, hour: int
-                       ) -> list[TrainRouteStats]:
+                       ) -> Union[list[TrainRouteStats], None]:
     from_time = datetime.time(hour)
     to_time = datetime.time(hour + 1) if hour != 23 else datetime.time(hour, 59)
     today_stats = hsp_route_statistics(from_crs, to_crs, HSPRequest(
@@ -56,6 +56,8 @@ def sample_route_stats(from_crs: str, to_crs: str,
         from_time = from_time,
         to_time = to_time,
         days = HSPDays.from_date(date)))
+    if today_stats is None:
+        return None
 
     tocs = [service.attributes.toc_code for service in today_stats]
     last_week_stats = hsp_route_statistics(from_crs, to_crs, HSPRequest(
@@ -65,6 +67,8 @@ def sample_route_stats(from_crs: str, to_crs: str,
         to_time = to_time,
         days = HSPDays.from_date(date),
         toc_filter = tocs))
+    if last_week_stats is None:
+        return None
     
     training_data = []
     for service in last_week_stats:
@@ -113,20 +117,27 @@ def delay_for_route(model: DelaysModel,
                     date: datetime.date,
                     depature_time: datetime.time) -> Union[int, None]:
     stats = sample_route_stats(from_crs, to_crs, date, depature_time.hour)
+    if stats is None:
+        return None
+
     stat = get_stat_at(stats, depature_time)
     if stat is None:
         return None
 
-    prediction = model(stat.as_model_input()).numpy()
-    probability = softmax(prediction).numpy()[0]
-    max_prob = max(probability)
-    if max_prob < 0.5:
-        return None
+    try:
+        prediction = model(stat.as_model_input()).numpy()
+        probability = softmax(prediction).numpy()[0]
+        max_prob = max(probability)
+        if max_prob < 0.5:
+            return None
 
-    max_index = probability.index(max_prob)
-    if max_index == 0: return 0
-    if max_index == 1: return 5
-    if max_index == 2: return 10
-    if max_index == 3: return 30
+        max_index = probability.index(max_prob)
+        if max_index == 0: return 0
+        if max_index == 1: return 5
+        if max_index == 2: return 10
+        if max_index == 3: return 30
+    except:
+        pass
+
     return None
 

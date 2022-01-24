@@ -488,6 +488,7 @@ def records_in_dtd_file(chunk_queue: Queue[RecordSet],
 
                 for record in entry_parser(entry_line.strip(), state):
                     chunk_generator.put(record)
+        progress.report(file, total_size_bytes, total_size_bytes)
 
 def records_in_dtd_file_set(executor: Executor, chunk_queue: Queue[Union[RecordSet, None]],
                             path: str, progress: Progress) -> Iterable[Future]:

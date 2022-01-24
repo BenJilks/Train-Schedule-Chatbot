@@ -1,12 +1,17 @@
 import datetime
+import config
+from pyowm.owm import OWM
 from typing import Callable, Union
-from interface.response import RoutePlanningState, UserInfo, UserLocation, format_delays_response
+from interface.response import RoutePlanningState, UserInfo, gather_information
+from interface.response import format_stops_response
+from interface.response import format_delays_response
+from interface.response import format_not_enough_data_response
 from interface.response import format_pending_response
 from interface.response import format_journey_response
 from interface.response import format_incidents_response
 from knowledge_base import TrainRoute, tiploc_route_to_crs_route
 from knowledge_base.feeds import open_database
-from knowledge_base.kb import Station
+from knowledge_base.weather import get_weather_at_crs, open_weather
 from reasoning_engine.delays import delay_for_route, open_delays_model
 from reasoning_engine.incidents import find_incidents, strip_html
 from reasoning_engine.routeing import Journey, filter_best_journeys, find_journeys_from_crs
@@ -54,7 +59,7 @@ def find_delays(db: Session, model: Model, journey: Journey, date: datetime.date
 
 def fetch_and_report_route_info(on_report: Callable[[str], None],
                                 db: Session, model: Model,
-                                state: RoutePlanningState) -> UserInfo:
+                                state: RoutePlanningState) -> Union[UserInfo, None]:
     assert not state.from_loc is None
     assert not state.to_loc is None
     on_report(format_pending_response(state))
@@ -65,10 +70,18 @@ def fetch_and_report_route_info(on_report: Callable[[str], None],
         state.from_loc.crs, state.to_loc.crs,
         state.date, state.time)
 
+    if len(journeys) == 0:
+        # Try looking at the start of tomorrow
+        journeys = find_journeys(db, state.from_loc.crs, state.to_loc.crs,
+            state.date + datetime.timedelta(days=1), datetime.time(0))
+
+        if len(journeys) == 0:
+            on_report(f'No route from { state.from_loc.name } to { state.to_loc.name } found')
+            return None
+
     # Ticket and journey info
     print('Reporting on journey info')
     _, journey = journeys[0]
-    print(journey[0].train.toc)
     tickets = ticket_prices(db, state.from_loc.crs, state.to_loc.crs)
     on_report(format_journey_response(state, journey, tickets))
 
@@ -88,45 +101,26 @@ def fetch_and_report_route_info(on_report: Callable[[str], None],
     return UserInfo(
         state.from_loc, state.to_loc,
         journey, alt_journey,
-        possible_incidents, possible_delay,
+        possible_incidents, None, # possible_delay,
         tickets)
-
-def generate_names_to_crs_map(db: Session) -> dict[str, str]:
-    if 'cache' in generate_names_to_crs_map.__dict__:
-        return generate_names_to_crs_map.cache
-
-    generate_names_to_crs_map.cache = { name: tiploc
-        for name, tiploc in db.query(Station.name, Station.crs_code).all() }
-    return generate_names_to_crs_map.cache
-
-def gather_information(db: Session, message: str, state: RoutePlanningState):
-    name_crs_map = generate_names_to_crs_map(db)
-    lower_message = message.lower()
-    locations_in_message = [
-        (name, crs, lower_message.index(name.lower()))
-        for name, crs in name_crs_map.items()
-        if name.lower() in lower_message]
-
-    locations_in_message.sort(key = lambda x: x[1])
-    for name, crs, _ in locations_in_message:
-        if state.from_loc is None:
-            state.from_loc = UserLocation(crs, name)
-        elif state.to_loc is None:
-            state.to_loc = UserLocation(crs, name)
 
 def handle_bot_conversation_state(bot: Mastodon,
                                   message: Message, 
                                   state: RoutePlanningState,
                                   db: Session,
-                                  model: Model) -> Union[Message, None]:
+                                  model: Model,
+                                  owm: OWM) -> Union[Message, None]:
     raw_text_message_content = strip_html(message.text)
     gather_information(db, raw_text_message_content, state)
     print(f'Got message { raw_text_message_content }')
 
-    if not has_enough_info_for_user_report(state):
-        return send_reply(bot, message, '<< Not enough info message >>')
-
     last_message = message
+    if 'hi' in message.text.lower():
+        last_message = send_reply(bot, last_message, 'Hi!')
+
+    if not has_enough_info_for_user_report(state):
+        return send_reply(bot, last_message, format_not_enough_data_response(state))
+
     if state.user_info is None:
         def reply(message: str):
             nonlocal last_message
@@ -134,9 +128,37 @@ def handle_bot_conversation_state(bot: Mastodon,
         state.user_info = fetch_and_report_route_info(reply, db, model, state)
     
     if not state.user_info is None and state.request_incidents:
-        last_message = message
+        print('Incidents requested')
+        if len(state.user_info.incidents) == 0:
+            last_message = send_reply(bot, last_message, 'No incidents to report')
         for incident in state.user_info.incidents:
-            last_message = send_reply(bot, last_message, incident.description)
+            last_message = send_reply(bot, last_message, strip_html(incident.description))
+        state.request_incidents = False
+
+    if not state.user_info is None and state.request_alternative:
+        print('Alt route requested')
+        last_message = send_reply(bot, last_message, 
+            format_delays_response(state.user_info.possible_delay, state.user_info.alt_journey))
+        state.request_alternative = False
+
+    if not state.from_loc is None and state.request_weather:
+        print('Weather requested')
+        date_and_time = datetime.datetime.combine(state.date, state.time)
+        date_time_str = date_and_time.strftime(config.STANDARD_DATE_TIME_FORMAT)
+        weather = get_weather_at_crs(db, owm, date_and_time, state.from_loc.crs)
+        if weather is None:
+            last_message = send_reply(bot, last_message, 
+                f'\nNo forecast for { state.from_loc.name } on { date_time_str } available')
+        else:
+            last_message = send_reply(bot, last_message, 
+                f'\nThe weather at { state.from_loc.name } on { date_time_str } will be { weather }')
+        state.request_weather = False
+
+    if not state.user_info is None and state.request_stops:
+        print('Stops requested')
+        last_message = send_reply(bot, last_message,
+            format_stops_response(db, state, state.user_info.journey))
+        state.request_stops = False
 
     return last_message
 
@@ -144,17 +166,13 @@ def main():
     print(' ==> Loading data')
     db = open_database()
     model = open_delays_model('prediction/delays.model')
+    owm = open_weather()
 
-    if False:
-        fetch_and_report_route_info(print, db, model, RoutePlanningState(
-            from_loc = UserLocation('CHM', 'Chelmsford'),
-            to_loc = UserLocation('COL', 'Colchester')))
-    else:
-        print(' ==> Listening for messages')
-        bot = open_bot()
-        conversation_handler(bot, RoutePlanningState,
-            handle_bot_conversation_state,
-            application_state = [db, model])
+    print(' ==> Listening for messages')
+    bot = open_bot()
+    conversation_handler(bot, RoutePlanningState,
+        handle_bot_conversation_state,
+        application_state = [db, model, owm])
 
 if __name__ == '__main__':
     main()

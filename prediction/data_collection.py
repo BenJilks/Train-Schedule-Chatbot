@@ -1,6 +1,4 @@
 import os, sys
-
-from reasoning_engine.delays import TrainRouteStats, sample_route_stats
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 
 import datetime
@@ -10,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from calendar import monthrange
 from random import randint
 from typing import Iterator
+from reasoning_engine.delays import TrainRouteStats, sample_route_stats
 from knowledge_base.dtd import TIPLOC, TimetableLink
 from knowledge_base.feeds import open_database
 from sqlalchemy.orm.session import Session

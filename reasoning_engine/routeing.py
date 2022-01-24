@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 from typing import Iterable, Sequence, Union
 from knowledge_base import TrainPath, TrainRoute, TrainRouteSegment, group
-from knowledge_base.dtd import TIPLOC, date_to_sql
+from knowledge_base.dtd import TIPLOC, TimetableLocationType, date_to_sql
 from knowledge_base.dtd import TimetableLocation, TrainTimetable, TimetableLink
 from sqlalchemy.sql.elements import literal
 from sqlalchemy.orm.session import Session
@@ -218,6 +218,7 @@ def find_journeys(db: Session,
                 for train in trains_by_paths[segment.path]
                 for stop in train
                     if (stop.location == journey[-1].end.location and
+                        stop.location_type != TimetableLocationType.Terminating and
                         stop.scheduled_departure_time > journey[-1].end.scheduled_arrival_time)]
             if len(trains) == 0:
                 break

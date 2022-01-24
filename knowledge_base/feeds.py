@@ -11,7 +11,7 @@ import shutil
 import datetime
 import traceback
 import config
-from typing import Iterable, Union
+from typing import Iterable, TextIO, Union
 from abc import ABC, abstractmethod
 from sqlalchemy.sql.schema import Column
 from sqlalchemy.sql.sqltypes import Integer, Text
@@ -102,7 +102,7 @@ class Feed(ABC):
     def feeds() -> list[Feed]:
         return [feed() for feed in Feed._registered_feeds]
 
-def open_database() -> Session:
+def open_database(file: TextIO = sys.stdout) -> Session:
     is_new_database = not os.path.exists(config.DATABASE_FILE)
     engine = sqlalchemy.create_engine('sqlite:///' + config.DATABASE_FILE)
     assert isinstance(engine, Engine)
@@ -114,7 +114,7 @@ def open_database() -> Session:
         db.execute('PRAGMA synchronous = NORMAL')
         db.execute('PRAGMA cache_size = 100000')
 
-    update_database(db)
+    update_database(db, file)
     return db
 
 def generate_opendata_token() -> str:
@@ -262,9 +262,9 @@ def backup_feed_file_to_storage(path: str, feed: Feed):
         os.path.join(path, file_name),
         os.path.join(storage_path, file_name))
 
-def update_feeds(db: Session, executor: Executor, feeds: Iterable[Feed]):
+def update_feeds(db: Session, executor: Executor, feeds: Iterable[Feed], file: TextIO):
     token = '' if config.DISABLE_DOWNLOAD else generate_opendata_token()
-    progress = Progress()
+    progress = Progress(file)
     data_path = tempfile.mkdtemp()
 
     download_tasks: list[Future[tuple[Feed, str]]] = []
@@ -334,7 +334,7 @@ def update_expiry_times(db: Session, feeds: Iterable[Feed]):
             expiry_timestamp = now + feed.expiry_length()))
     db.commit()
 
-def update_database(db: Session):
+def update_database(db: Session, file: TextIO):
     global is_updating
     if is_updating:
         return
@@ -343,12 +343,12 @@ def update_database(db: Session):
     if len(outdated_feeds) == 0:
         return
 
-    print('Updating feeds', *[feed.feed_api_url() for feed in outdated_feeds])
+    print('Updating feeds', *[feed.feed_api_url() for feed in outdated_feeds], file=file)
     is_updating = True
 
     with ThreadPoolExecutor() as executor:
         try:
-            update_feeds(db, executor, outdated_feeds)
+            update_feeds(db, executor, outdated_feeds, file)
         except Exception as e:
             print(Exception, e, file=sys.stderr)
             traceback.print_exc(file=sys.stderr)

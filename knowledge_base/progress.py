@@ -2,7 +2,7 @@ import sys
 from dataclasses import dataclass
 from queue import Queue
 from threading import Lock
-from typing import Union
+from typing import TextIO, Union
 
 BAR_LENGTH = 50
 NAME_LEN = 20
@@ -17,20 +17,22 @@ class Progress:
     _last_bar_count: Union[int, None]
     _mutex: Lock
     _report_queue: Queue[tuple[str, int, int]]
+    _file: TextIO
 
-    def __init__(self):
+    def __init__(self, file: TextIO):
         self._bars = {}
         self._last_bar_count = None
         self._mutex = Lock()
         self._report_queue = Queue()
+        self._file = file
 
     def _draw_bar(self, bar: ProgressBar):
         progress = int((float(bar.done) / float(bar.out_of)) * BAR_LENGTH)
         print(''.join([
             ('>' if i == progress else '=') if i <= progress else ' '
             for i in range(BAR_LENGTH)
-        ]), end='')
-        print(f'] { bar.done } / { bar.out_of }', end='')
+        ]), end='', file=self._file)
+        print(f'] { bar.done } / { bar.out_of }', end='', file=self._file)
 
     def _clean_draw(self):
         if len(self._bars) == 0:
@@ -40,17 +42,17 @@ class Progress:
         self._last_bar_count = len(self._bars)
         for name, bar in self._bars.items():
             display_name = name if len(name) < NAME_LEN else (name[:(NAME_LEN - 3)] + '...')
-            print(('{:>' + str(NAME_LEN) + '} [').format(display_name), end='')
+            print(('{:>' + str(NAME_LEN) + '} [').format(display_name), end='', file=self._file)
             self._draw_bar(bar)
-            print()
+            print(file=self._file)
 
     def _quick_update(self):
-        print(f"\033[G\033[{ self._last_bar_count }A", end='')
+        print(f"\033[G\033[{ self._last_bar_count }A", end='', file=self._file)
         for bar in self._bars.values():
-            print(f"\033[{ NAME_LEN + 2 }C\033[K", end='')
+            print(f"\033[{ NAME_LEN + 2 }C\033[K", end='', file=self._file)
             self._draw_bar(bar)
-            print('\033[E', end='')
-        print('\033[G', end='')
+            print('\033[E', end='', file=self._file)
+        print('\033[G', end='', file=self._file)
         sys.stdout.flush()
 
     def _update_report(self, name: str, done: int, out_of: int):
@@ -66,7 +68,7 @@ class Progress:
             return
 
         if not self._last_bar_count is None:
-            print(f"\033[G\033[{ self._last_bar_count }A\033[J", end='')
+            print(f"\033[G\033[{ self._last_bar_count }A\033[J", end='', file=self._file)
         self._clean_draw()
         return
 
