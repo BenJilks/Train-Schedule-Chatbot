@@ -57,12 +57,12 @@ def find_delays(db: Session, model: Model, journey: Journey, date: datetime.date
     start_crs, stop_crs = tiploc_route_to_crs_route(db, start_tiploc, end_tiploc)
     return delay_for_route(model, start_crs, stop_crs, date, departure_time)
 
-def fetch_and_report_route_info(on_report: Callable[[str], None],
+def fetch_and_report_route_info(on_response: Callable[[str], None],
                                 db: Session, model: Model,
                                 state: RoutePlanningState) -> Union[UserInfo, None]:
     assert not state.from_loc is None
     assert not state.to_loc is None
-    on_report(format_pending_response(state))
+    on_response(format_pending_response(state))
 
     # Route journeys
     print('Finding route')
@@ -76,26 +76,26 @@ def fetch_and_report_route_info(on_report: Callable[[str], None],
             state.date + datetime.timedelta(days=1), datetime.time(0))
 
         if len(journeys) == 0:
-            on_report(f'No route from { state.from_loc.name } to { state.to_loc.name } found')
+            on_response(f'No route from { state.from_loc.name } to { state.to_loc.name } found')
             return None
 
     # Ticket and journey info
     print('Reporting on journey info')
     _, journey = journeys[0]
     tickets = ticket_prices(db, state.from_loc.crs, state.to_loc.crs)
-    on_report(format_journey_response(state, journey, tickets))
+    on_response(format_journey_response(state, journey, tickets))
 
     # Incidents
     print('Gathering incidents')
     possible_incidents = find_incidents(db, journeys)
     if len(possible_incidents) != 0:
-        on_report(format_incidents_response(possible_incidents))
+        on_response(format_incidents_response(possible_incidents))
 
     # Delays
     print('Predicting delays')
     _, alt_journey = journeys[1] if len(journeys) > 1 else None, None
     possible_delay = find_delays(db, model, journey, state.date)
-    on_report(format_delays_response(possible_delay, alt_journey))
+    on_response(format_delays_response(possible_delay, alt_journey))
 
     print('Done')
     return UserInfo(
@@ -116,29 +116,26 @@ def handle_conversation_state(text: str,
 
     lower_message = text.lower()
     if 'hi ' in lower_message or 'hi!' in lower_message or 'hello' in lower_message:
-        last_message = on_response('Hi!')
+        on_response('Hi!')
 
     if not has_enough_info_for_user_report(state):
         return on_response(format_not_enough_data_response(state))
 
     if state.user_info is None or state.rerequest_tickets:
-        def reply(message: str):
-            nonlocal last_message
-            last_message = on_response(message)
-        state.user_info = fetch_and_report_route_info(reply, db, model, state)
+        state.user_info = fetch_and_report_route_info(on_response, db, model, state)
         state.rerequest_tickets = False
     
     if not state.user_info is None and state.request_incidents:
         print('Incidents requested')
         if len(state.user_info.incidents) == 0:
-            last_message = on_response('No incidents to report')
+            on_response('No incidents to report')
         for incident in state.user_info.incidents:
-            last_message = on_response(strip_html(incident.description))
+            on_response(strip_html(incident.description))
         state.request_incidents = False
 
     if not state.user_info is None and state.request_alternative:
         print('Alt route requested')
-        last_message = on_response(format_delays_response(
+        on_response(format_delays_response(
             state.user_info.possible_delay, state.user_info.alt_journey))
         state.request_alternative = False
 
@@ -148,16 +145,16 @@ def handle_conversation_state(text: str,
         date_time_str = date_and_time.strftime(config.STANDARD_DATE_TIME_FORMAT)
         weather = get_weather_at_crs(db, owm, date_and_time, state.from_loc.crs)
         if weather is None:
-            last_message = on_response(
+            on_response(
                 f'\nNo forecast for { state.from_loc.name } on { date_time_str } available')
         else:
-            last_message = on_response(
+            on_response(
                 f'\nThe weather at { state.from_loc.name } on { date_time_str } will be { weather }')
         state.request_weather = False
 
     if not state.user_info is None and state.request_stops:
         print('Stops requested')
-        last_message = on_response(format_stops_response(
+        on_response(format_stops_response(
             db, state, state.user_info.journey))
         state.request_stops = False
 
