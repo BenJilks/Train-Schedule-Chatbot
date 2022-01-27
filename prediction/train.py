@@ -31,10 +31,10 @@ def row_string_to_float(row):
     row.late_5 = float(row.late_5)
     row.late_10 = float(row.late_10)
     row.late_30 = float(row.late_30)
-    row.was_late_0 = float(row.was_late_0)
-    row.was_late_5 = float(row.was_late_5)
-    row.was_late_10 = float(row.was_late_10)
-    row.was_late_30 = float(row.was_late_30)
+    row.was_late_0 = 1.0 if (row.was_late_0 == 'True' or row.was_late_0 == '1') else 0.0
+    row.was_late_5 = 1.0 if (row.was_late_5 == 'True' or row.was_late_5 == '1') else 0.0
+    row.was_late_10 = 1.0 if (row.was_late_10 == 'True' or row.was_late_10 == '1') else 0.0
+    row.was_late_30 = 1.0 if (row.was_late_30 == 'True' or row.was_late_30 == '1') else 0.0
     return row
 
 def load_training_data(file_path: str) -> tuple[np.ndarray, np.ndarray]:

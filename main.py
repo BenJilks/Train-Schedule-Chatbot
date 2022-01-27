@@ -1,7 +1,7 @@
 import datetime
 import config
 from pyowm.owm import OWM
-from typing import Callable, Union
+from typing import Any, Callable, Union
 from interface.response import RoutePlanningState, UserInfo, gather_information
 from interface.response import format_stops_response
 from interface.response import format_delays_response
@@ -104,41 +104,42 @@ def fetch_and_report_route_info(on_report: Callable[[str], None],
         possible_incidents, None, # possible_delay,
         tickets)
 
-def handle_bot_conversation_state(bot: Mastodon,
-                                  message: Message, 
-                                  state: RoutePlanningState,
-                                  db: Session,
-                                  model: Model,
-                                  owm: OWM) -> Union[Message, None]:
-    raw_text_message_content = strip_html(message.text)
+def handle_conversation_state(text: str,
+                              on_response: Callable[[str], None],
+                              state: RoutePlanningState,
+                              db: Session,
+                              model: Model,
+                              owm: OWM):
+    raw_text_message_content = strip_html(text)
     gather_information(db, raw_text_message_content, state)
     print(f'Got message { raw_text_message_content }')
 
-    last_message = message
-    if 'hi' in message.text.lower():
-        last_message = send_reply(bot, last_message, 'Hi!')
+    lower_message = text.lower()
+    if 'hi ' in lower_message or 'hi!' in lower_message or 'hello' in lower_message:
+        last_message = on_response('Hi!')
 
     if not has_enough_info_for_user_report(state):
-        return send_reply(bot, last_message, format_not_enough_data_response(state))
+        return on_response(format_not_enough_data_response(state))
 
-    if state.user_info is None:
+    if state.user_info is None or state.rerequest_tickets:
         def reply(message: str):
             nonlocal last_message
-            last_message = send_reply(bot, last_message, message)
+            last_message = on_response(message)
         state.user_info = fetch_and_report_route_info(reply, db, model, state)
+        state.rerequest_tickets = False
     
     if not state.user_info is None and state.request_incidents:
         print('Incidents requested')
         if len(state.user_info.incidents) == 0:
-            last_message = send_reply(bot, last_message, 'No incidents to report')
+            last_message = on_response('No incidents to report')
         for incident in state.user_info.incidents:
-            last_message = send_reply(bot, last_message, strip_html(incident.description))
+            last_message = on_response(strip_html(incident.description))
         state.request_incidents = False
 
     if not state.user_info is None and state.request_alternative:
         print('Alt route requested')
-        last_message = send_reply(bot, last_message, 
-            format_delays_response(state.user_info.possible_delay, state.user_info.alt_journey))
+        last_message = on_response(format_delays_response(
+            state.user_info.possible_delay, state.user_info.alt_journey))
         state.request_alternative = False
 
     if not state.from_loc is None and state.request_weather:
@@ -147,26 +148,54 @@ def handle_bot_conversation_state(bot: Mastodon,
         date_time_str = date_and_time.strftime(config.STANDARD_DATE_TIME_FORMAT)
         weather = get_weather_at_crs(db, owm, date_and_time, state.from_loc.crs)
         if weather is None:
-            last_message = send_reply(bot, last_message, 
+            last_message = on_response(
                 f'\nNo forecast for { state.from_loc.name } on { date_time_str } available')
         else:
-            last_message = send_reply(bot, last_message, 
+            last_message = on_response(
                 f'\nThe weather at { state.from_loc.name } on { date_time_str } will be { weather }')
         state.request_weather = False
 
     if not state.user_info is None and state.request_stops:
         print('Stops requested')
-        last_message = send_reply(bot, last_message,
-            format_stops_response(db, state, state.user_info.journey))
+        last_message = on_response(format_stops_response(
+            db, state, state.user_info.journey))
         state.request_stops = False
 
+def handle_bot_conversation_state(bot: Mastodon,
+                                  message: Message, 
+                                  state: RoutePlanningState,
+                                  db: Session,
+                                  model: Model,
+                                  owm: OWM) -> Union[Message, None]:
+    last_message = message
+    def on_response(response: str):
+        nonlocal last_message
+        last_message = send_reply(bot, last_message, response)
+
+    handle_conversation_state(message.text,
+        on_response, state, db, model, owm)
     return last_message
+
+def text_mode(db: Session, model: Model, owm: OWM):
+    print(' !!! WARNING: Mastodon disabled, running in text mode !!! ')
+    state = RoutePlanningState()
+    while True:
+        text = input('>> ')
+        if text.strip().lower() in ['exit', 'quit', 'q']:
+            break
+
+        handle_conversation_state(text,
+            print, state, db, model, owm)
 
 def main():
     print(' ==> Loading data')
     db = open_database()
     model = open_delays_model('prediction/delays.model')
     owm = open_weather()
+
+    if config.DISABLE_MASTODON:
+        text_mode(db, model, owm)
+        return
 
     print(' ==> Listening for messages')
     bot = open_bot()

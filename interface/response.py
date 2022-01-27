@@ -19,8 +19,8 @@ journey_template = (
 """
 The latest train will be leaving {from_loc} at {departure_time}, it will arrive at {to_loc} at {arrival_time}.
 With {stops} stops.
-Single ticket: {single_ticket_price}
-Return ticket: {return_ticket_price}
+{ticket_type} single ticket: {single_ticket_price}
+{ticket_type} return ticket: {return_ticket_price}
 {link}
 """)
 
@@ -37,7 +37,7 @@ The train is expected to be {delay}.
 
 incidents_template = (
 """
-Incidents that may effect your journey:
+Incidents that may affect your journey:
 {incidents}
 """
 )
@@ -71,6 +71,7 @@ class RoutePlanningState(ConversationState):
     request_alternative: bool = False
     request_weather: bool = False
     request_stops: bool = False
+    rerequest_tickets: bool = False
     ticket_for: TicketFor = TicketFor.Adult
     user_info: Union[UserInfo, None] = None
 
@@ -141,6 +142,7 @@ def format_journey_response(state: RoutePlanningState,
         departure_time = start_station.public_departure.strftime(config.STANDARD_TIME_FORMAT),
         arrival_time = end_station.public_arrival.strftime(config.STANDARD_TIME_FORMAT),
         stops = len(journey) - 1,
+        ticket_type = 'Adult' if state.ticket_for == TicketFor.Adult else 'Child',
         single_ticket_price = format_price(cheapest_single),
         return_ticket_price = format_price(cheapest_return),
         link = get_link(state))
@@ -217,7 +219,7 @@ def gather_locations(db: Session, message: str, state: RoutePlanningState):
         for name, crs in name_crs_map.items()
         if f' { name.lower() } ' in lower_message]
 
-    locations_in_message.sort(key = lambda x: x[1])
+    locations_in_message.sort(key = lambda x: x[2])
     for name, crs, _ in locations_in_message:
         if state.from_loc is None:
             state.from_loc = UserLocation(crs, name)
@@ -266,7 +268,7 @@ def gather_dates(message: str, state: RoutePlanningState):
         return
 
     for day, day_name in enumerate(config.DAYS_OF_WEEK):
-        if day_name in lower_message:
+        if day_name.lower() in lower_message:
             state.date = next_date_on_day(day)
     
     possible_date_strs = ([
@@ -319,6 +321,12 @@ def gather_extra_request(message: str, state: RoutePlanningState):
         state.request_weather = True
     if 'stop' in lower_message or 'change over' in lower_message:
         state.request_stops = True
+    if 'adult' in lower_message:
+        state.ticket_for = TicketFor.Adult
+        state.rerequest_tickets = True
+    if 'child' in lower_message:
+        state.ticket_for = TicketFor.Child
+        state.rerequest_tickets = True
 
 def gather_information(db: Session, message: str, state: RoutePlanningState):
     gather_locations(db, message, state)
