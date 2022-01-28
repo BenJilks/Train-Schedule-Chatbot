@@ -1,0 +1,19 @@
+{
+  "greetings" :{
+    "patterns":["hey", "hi", "greetings", "hello", "good day"]
+  },
+  "goodbye" : {
+    "patterns": ["bye", "Goodbye", "see ya", "I am going now", "Thanks for the help"]
+  },
+
+  "origin" : {
+    "patterns": ["What are you?", "What is this?", "Who created you?", "Who are you?"]
+  },
+  "go-to": {
+    "patterns" : ["I want to go to <__GPE__>","how do I go to <__GPE__>", "which way to <__GPE__>"]
+  },
+  "go-from": {
+    "patterns" : ["I want to go to from <__GPE__>","how do I go from <__GPE__>"]
+  }
+
+}
