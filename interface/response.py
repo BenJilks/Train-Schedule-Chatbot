@@ -54,7 +54,6 @@ class UserInfo:
     journey: Journey
     alt_journey: Union[Journey, None]
     incidents: list[Incident]
-    possible_delay: Union[int, None]
     tickets: list[tuple[int, TicketType]]
 
 class TicketFor(Enum):
@@ -68,10 +67,10 @@ class RoutePlanningState(ConversationState):
     date: datetime.date = datetime.date.today()
     time: datetime.time = datetime.datetime.now().time()
     request_incidents: bool = False
-    request_alternative: bool = False
     request_weather: bool = False
     request_stops: bool = False
     rerequest_tickets: bool = False
+    request_delays: bool = False
     ticket_for: TicketFor = TicketFor.Adult
     user_info: Union[UserInfo, None] = None
 
@@ -315,12 +314,12 @@ def gather_extra_request(message: str, state: RoutePlanningState):
     lower_message = message.lower()
     if 'incident' in lower_message:
         state.request_incidents = True
-    if 'alternative' in lower_message:
-        state.request_alternative = True
     if 'weather' in lower_message or 'forecast' in lower_message:
         state.request_weather = True
     if 'stop' in lower_message or 'change over' in lower_message:
         state.request_stops = True
+    if 'delay' in lower_message or 'alternative' in lower_message:
+        state.request_delays = True
     if 'adult' in lower_message:
         state.ticket_for = TicketFor.Adult
         state.rerequest_tickets = True

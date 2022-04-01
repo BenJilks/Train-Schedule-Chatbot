@@ -10,7 +10,7 @@ HSP_SERVICE_DETAILS_API_URL = HSP_API_URL + '/serviceDetails'
 DARWIN_TOKEN = 'c77dcba0-aed9-426f-97b5-e52274822e42'
 DARWIN_API_URL = 'https://lite.realtime.nationalrail.co.uk/OpenLDBWS/wsdl.aspx?ver=2016-02-16'
 
-DISABLE_MASTODON = True
+DISABLE_MASTODON = False
 MASTODON_ACCESS_TOKEN = 'LbbDbxIR3FQsKjMKzfiI-0sTKkm5Nj2Ynj_wDou1gBM'
 MASTODON_API_BASE_URL = 'http://0.0.0.0:3000/'
 

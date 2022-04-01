@@ -91,18 +91,13 @@ def fetch_and_report_route_info(on_response: Callable[[str], None],
     if len(possible_incidents) != 0:
         on_response(format_incidents_response(possible_incidents))
 
-    # Delays
-    print('Predicting delays')
+    # Alt route
     _, alt_journey = journeys[1] if len(journeys) > 1 else None, None
-    possible_delay = find_delays(db, model, journey, state.date)
-    on_response(format_delays_response(possible_delay, alt_journey))
 
     print('Done')
     return UserInfo(
-        state.from_loc, state.to_loc,
-        journey, alt_journey,
-        possible_incidents, None, # possible_delay,
-        tickets)
+        state.from_loc, state.to_loc, journey, 
+        alt_journey, possible_incidents, tickets)
 
 def handle_conversation_state(text: str,
                               on_response: Callable[[str], None],
@@ -125,6 +120,12 @@ def handle_conversation_state(text: str,
         state.user_info = fetch_and_report_route_info(on_response, db, model, state)
         state.rerequest_tickets = False
     
+    if not state.user_info is None and state.request_delays:
+        print('Predicting delays request')
+        possible_delay = find_delays(db, model, state.user_info.journey, state.date)
+        on_response(format_delays_response(possible_delay, state.user_info.alt_journey))
+        state.request_delays = False
+
     if not state.user_info is None and state.request_incidents:
         print('Incidents requested')
         if len(state.user_info.incidents) == 0:
@@ -132,12 +133,6 @@ def handle_conversation_state(text: str,
         for incident in state.user_info.incidents:
             on_response(strip_html(incident.description))
         state.request_incidents = False
-
-    if not state.user_info is None and state.request_alternative:
-        print('Alt route requested')
-        on_response(format_delays_response(
-            state.user_info.possible_delay, state.user_info.alt_journey))
-        state.request_alternative = False
 
     if not state.from_loc is None and state.request_weather:
         print('Weather requested')
